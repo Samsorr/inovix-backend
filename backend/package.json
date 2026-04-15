@@ -18,7 +18,10 @@
     "ib": "init-backend",
     "start": "init-backend && cd .medusa/server && medusa start --verbose",
     "dev": "medusa develop",
-    "email:dev": "email dev --dir=./src/modules/email-notifications/templates --port=3002"
+    "email:dev": "email dev --dir=./src/modules/email-notifications/templates --port=3002",
+    "test": "jest --passWithNoTests",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
   },
   "dependencies": {
     "@medusajs/admin-sdk": "2.12.1",
