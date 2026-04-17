@@ -15,6 +15,11 @@ export const IS_DEV = process.env.NODE_ENV === 'development'
 export const BACKEND_URL = process.env.BACKEND_PUBLIC_URL ?? process.env.RAILWAY_PUBLIC_DOMAIN_VALUE ?? 'http://localhost:9000'
 
 /**
+ * Public URL for the storefront (used in customer-facing emails)
+ */
+export const STOREFRONT_URL = process.env.STOREFRONT_URL ?? 'http://localhost:8000'
+
+/**
  * Database URL for Postgres instance used by the backend
  */
 export const DATABASE_URL = assertValue(
@@ -83,6 +88,17 @@ export const SENDGRID_FROM_EMAIL = process.env.SENDGRID_FROM_EMAIL || process.en
  */
 export const STRIPE_API_KEY = process.env.STRIPE_API_KEY;
 export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+
+/**
+ * (optional) Viva Wallet Smart Checkout configuration
+ */
+export const VIVA_CLIENT_ID = process.env.VIVA_CLIENT_ID;
+export const VIVA_CLIENT_SECRET = process.env.VIVA_CLIENT_SECRET;
+export const VIVA_MERCHANT_ID = process.env.VIVA_MERCHANT_ID;
+export const VIVA_API_KEY = process.env.VIVA_API_KEY;
+export const VIVA_SOURCE_CODE = process.env.VIVA_SOURCE_CODE;
+export const VIVA_ENVIRONMENT =
+  (process.env.VIVA_ENVIRONMENT as "production" | "demo" | undefined) ?? "production";
 
 /**
  * (optional) Meilisearch configuration

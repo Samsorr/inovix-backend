@@ -1,3 +1,4 @@
+import 'lib/instrument';
 import { loadEnv, Modules, defineConfig } from '@medusajs/utils';
 import {
   ADMIN_CORS,
@@ -15,6 +16,12 @@ import {
   STORE_CORS,
   STRIPE_API_KEY,
   STRIPE_WEBHOOK_SECRET,
+  VIVA_API_KEY,
+  VIVA_CLIENT_ID,
+  VIVA_CLIENT_SECRET,
+  VIVA_ENVIRONMENT,
+  VIVA_MERCHANT_ID,
+  VIVA_SOURCE_CODE,
   WORKER_MODE,
   MINIO_ENDPOINT,
   MINIO_ACCESS_KEY,
@@ -117,22 +124,39 @@ const medusaConfig = {
         ]
       }
     }] : []),
-    ...(STRIPE_API_KEY && STRIPE_WEBHOOK_SECRET ? [{
-      key: Modules.PAYMENT,
-      resolve: '@medusajs/payment',
-      options: {
-        providers: [
-          {
-            resolve: '@medusajs/payment-stripe',
-            id: 'stripe',
+    ...(
+      (STRIPE_API_KEY && STRIPE_WEBHOOK_SECRET) ||
+      (VIVA_CLIENT_ID && VIVA_CLIENT_SECRET && VIVA_MERCHANT_ID && VIVA_API_KEY)
+        ? [{
+            key: Modules.PAYMENT,
+            resolve: '@medusajs/payment',
             options: {
-              apiKey: STRIPE_API_KEY,
-              webhookSecret: STRIPE_WEBHOOK_SECRET,
+              providers: [
+                ...(STRIPE_API_KEY && STRIPE_WEBHOOK_SECRET ? [{
+                  resolve: '@medusajs/payment-stripe',
+                  id: 'stripe',
+                  options: {
+                    apiKey: STRIPE_API_KEY,
+                    webhookSecret: STRIPE_WEBHOOK_SECRET,
+                  },
+                }] : []),
+                ...(VIVA_CLIENT_ID && VIVA_CLIENT_SECRET && VIVA_MERCHANT_ID && VIVA_API_KEY ? [{
+                  resolve: './src/modules/payment-viva-wallet',
+                  id: 'viva',
+                  options: {
+                    clientId: VIVA_CLIENT_ID,
+                    clientSecret: VIVA_CLIENT_SECRET,
+                    merchantId: VIVA_MERCHANT_ID,
+                    apiKey: VIVA_API_KEY,
+                    sourceCode: VIVA_SOURCE_CODE,
+                    environment: VIVA_ENVIRONMENT,
+                  },
+                }] : []),
+              ],
             },
-          },
-        ],
-      },
-    }] : [])
+          }]
+        : []
+    )
   ],
   plugins: [
   ...(MEILISEARCH_HOST && MEILISEARCH_ADMIN_KEY ? [{
@@ -160,5 +184,7 @@ const medusaConfig = {
   ]
 };
 
-console.log(JSON.stringify(medusaConfig, null, 2));
+if (process.env.MEDUSA_CONFIG_DEBUG === 'true') {
+  console.log(JSON.stringify(medusaConfig, null, 2));
+}
 export default defineConfig(medusaConfig);

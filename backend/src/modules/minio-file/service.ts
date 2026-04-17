@@ -32,6 +32,17 @@ export interface MinioFileProviderOptions {
 
 const DEFAULT_BUCKET = 'medusa-media'
 
+const ALLOWED_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/svg+xml',
+  'application/pdf',
+])
+
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+
 /**
  * Service to handle file storage using MinIO.
  */
@@ -189,10 +200,17 @@ class MinioFileProviderService extends AbstractFileProviderService {
       )
     }
 
+    if (!file.mimeType || !ALLOWED_MIME_TYPES.has(file.mimeType)) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `Unsupported file type${file.mimeType ? `: ${file.mimeType}` : ''}. Allowed: ${Array.from(ALLOWED_MIME_TYPES).join(', ')}`
+      )
+    }
+
     try {
       const parsedFilename = path.parse(file.filename)
       const fileKey = `${parsedFilename.name}-${ulid()}${parsedFilename.ext}`
-      
+
       // Handle different content types properly
       let content: Buffer
       if (Buffer.isBuffer(file.content)) {
@@ -207,6 +225,13 @@ class MinioFileProviderService extends AbstractFileProviderService {
       } else {
         // Handle ArrayBuffer, Uint8Array, or any other buffer-like type
         content = Buffer.from(file.content as any)
+      }
+
+      if (content.length > MAX_FILE_SIZE_BYTES) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `File exceeds maximum size of ${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB`
+        )
       }
 
       // Upload file with public-read access

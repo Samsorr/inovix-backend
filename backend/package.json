@@ -36,6 +36,7 @@
     "@medusajs/workflow-engine-redis": "2.12.1",
     "@react-email/components": "^1.0.1",
     "@rokmohar/medusa-plugin-meilisearch": "1.3.5",
+    "@sentry/node": "^10.49.0",
     "medusajs-launch-utils": "0.0.18",
     "minio": "^8.0.6",
     "resend": "4.0.1",
