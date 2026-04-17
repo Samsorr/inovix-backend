@@ -26,15 +26,27 @@ export default async function orderPlacedHandler({
 
     // Only send the confirmation once payment has actually been captured.
     // `order.payment_status` is often undefined at the time this subscriber
-    // fires because the order/payment link is still committing, so look at
-    // the linked payment collection directly via query.graph for a
-    // reliable read.
-    const { data: paymentCollections } = await query.graph({
-      entity: 'payment_collection',
-      filters: { order_id: data.id },
-      fields: ['id', 'status', 'captured_amount'],
+    // fires because the order/payment link is still committing, so read the
+    // linked payment collection via the order entity (payment_collection is
+    // a remote link, not a direct foreign key on payment_collection itself).
+    const { data: orders } = await query.graph({
+      entity: 'order',
+      filters: { id: data.id },
+      fields: [
+        'id',
+        'payment_collections.status',
+        'payment_collections.captured_amount',
+      ],
     })
-    const paymentCollection = paymentCollections?.[0]
+    const orderWithCollections = orders?.[0] as
+      | {
+          payment_collections?: Array<{
+            status?: string
+            captured_amount?: number
+          }>
+        }
+      | undefined
+    const paymentCollection = orderWithCollections?.payment_collections?.[0]
     const isPaid =
       paymentCollection?.status === 'completed' ||
       Number(paymentCollection?.captured_amount ?? 0) > 0
