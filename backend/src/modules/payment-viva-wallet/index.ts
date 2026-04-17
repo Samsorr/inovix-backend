@@ -1,5 +1,12 @@
+import { ModuleProviderExports } from "@medusajs/framework/types"
 import VivaPaymentProviderService from "./service"
 
-export default VivaPaymentProviderService
+const services = [VivaPaymentProviderService]
+
+const providerExport: ModuleProviderExports = {
+  services,
+}
+
+export default providerExport
 export { VivaPaymentProviderService }
 export * from "./types"
