@@ -126,10 +126,18 @@ export class VivaClient {
   }
 
   async cancelOrder(orderCode: number): Promise<void> {
-    await this.oauthFetch(
-      `${this.endpoints.api}/checkout/v2/orders/${orderCode}`,
-      { method: "DELETE" }
-    )
+    try {
+      await this.oauthFetch(
+        `${this.endpoints.api}/checkout/v2/orders/${orderCode}`,
+        { method: "DELETE" }
+      )
+    } catch (err) {
+      // Viva returns 404 when the order has already expired or been
+      // consumed — that's a benign state for our cleanup path. Any other
+      // error still propagates so real failures stay visible.
+      const msg = (err as Error).message ?? ""
+      if (!msg.includes("404")) throw err
+    }
   }
 
   async refundTransaction(
