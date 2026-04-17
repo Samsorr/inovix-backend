@@ -10,7 +10,7 @@ type RequestBody = {
 }
 
 type SessionDataShape = {
-  orderCode?: number
+  orderCode?: string
   checkoutUrl?: string
   transactionId?: string
   amount?: number

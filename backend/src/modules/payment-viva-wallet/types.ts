@@ -26,28 +26,31 @@ export type CreateOrderInput = {
   customerTrns?: string
   customer?: VivaCustomer
   idempotencyKey?: string
+  webhookUrl?: string
 }
 
 export type CreateOrderResult = {
-  orderCode: number
+  // Viva orderCodes can exceed Number.MAX_SAFE_INTEGER once printed as
+  // 16-digit IDs — always keep them as strings at module boundaries.
+  orderCode: string
   checkoutUrl: string
 }
 
 export type VivaTransactionStatus =
-  | "F"
-  | "A"
-  | "E"
-  | "X"
-  | "R"
-  | "M"
-  | "P"
-  | "C"
+  | "F" // Paid / funded
+  | "A" // Authorized (pending capture)
+  | "E" // Error / declined
+  | "X" // Cancelled
+  | "C" // Cancelled (alternative)
+  | "R" // Refunded
+  | "M" // Maintenance / tokenised, awaiting capture
+  | "P" // Pre-authorised
 
 export type VivaTransaction = {
   StatusId: VivaTransactionStatus
   Amount: number
   Currency: string
-  OrderCode: number
+  OrderCode: string
   TransactionId: string
   MerchantTrns?: string | null
   CustomerTrns?: string | null
@@ -64,7 +67,7 @@ export type VivaWebhookPayload = {
   Url?: string
   EventData: Record<string, unknown> & {
     TransactionId?: string
-    OrderCode?: number
+    OrderCode?: string | number
     Amount?: number
     StatusId?: VivaTransactionStatus
     MerchantTrns?: string

@@ -45,7 +45,7 @@ export class VivaClient {
     this.endpoints = ENDPOINTS[options.environment ?? "production"]
   }
 
-  async getCheckoutUrl(orderCode: number): Promise<string> {
+  async getCheckoutUrl(orderCode: string): Promise<string> {
     return `${this.endpoints.checkout}?ref=${orderCode}`
   }
 
@@ -75,6 +75,10 @@ export class VivaClient {
       paymentTimeout: 900,
     }
 
+    if (input.webhookUrl) {
+      body.webhookUrl = input.webhookUrl
+    }
+
     if (input.customer) {
       body.customer = {
         email: input.customer.email,
@@ -95,8 +99,13 @@ export class VivaClient {
       }
     )
 
-    const data = (await res.json()) as { orderCode?: number }
-    if (!data.orderCode) {
+    // Parse body as raw text first: Viva orderCodes are 16-digit numbers
+    // that exceed JS MAX_SAFE_INTEGER, so we must never let JSON.parse
+    // coerce them to a number.
+    const rawText = await res.text()
+    const match = rawText.match(/"orderCode"\s*:\s*(\d+)/)
+    const orderCode = match?.[1]
+    if (!orderCode) {
       throw new MedusaError(
         MedusaError.Types.UNEXPECTED_STATE,
         "Viva createOrder: missing orderCode in response"
@@ -104,8 +113,8 @@ export class VivaClient {
     }
 
     return {
-      orderCode: data.orderCode,
-      checkoutUrl: await this.getCheckoutUrl(data.orderCode),
+      orderCode,
+      checkoutUrl: await this.getCheckoutUrl(orderCode),
     }
   }
 
@@ -123,9 +132,17 @@ export class VivaClient {
     // in `{Transactions: [{StatusId, Amount, Currency, ...}]}`; the OAuth
     // shape returns a single object with lowercase keys (`statusId`,
     // `amount`, `currencyCode`). Normalise both to VivaTransaction.
-    const legacy = raw as { Transactions?: VivaTransaction[] }
-    if (Array.isArray(legacy.Transactions) && legacy.Transactions[0]) {
-      return legacy.Transactions[0]
+    const legacy = raw as { Transactions?: Array<Partial<VivaTransaction> & { OrderCode?: string | number }> }
+    const legacyTx = legacy.Transactions?.[0]
+    if (legacyTx && typeof legacyTx.StatusId === "string") {
+      return {
+        ...legacyTx,
+        StatusId: legacyTx.StatusId,
+        Amount: Number(legacyTx.Amount ?? 0),
+        Currency: String(legacyTx.Currency ?? ""),
+        OrderCode: String(legacyTx.OrderCode ?? ""),
+        TransactionId: String(legacyTx.TransactionId ?? transactionId),
+      } as VivaTransaction
     }
 
     if (typeof raw.statusId === "string") {
@@ -133,7 +150,7 @@ export class VivaClient {
         statusId: VivaTransaction["StatusId"]
         amount: number
         currencyCode: number | string
-        orderCode: number
+        orderCode: string | number
         transactionId?: string
         merchantTrns?: string | null
         customerTrns?: string | null
@@ -147,7 +164,7 @@ export class VivaClient {
         // service's reconciliation logic stays consistent.
         Amount: Math.round(Number(tx.amount) * 100),
         Currency: this.currencyNumericToIso(tx.currencyCode),
-        OrderCode: tx.orderCode,
+        OrderCode: String(tx.orderCode),
         TransactionId: tx.transactionId ?? transactionId,
         MerchantTrns: tx.merchantTrns ?? null,
         CustomerTrns: tx.customerTrns ?? null,
@@ -162,7 +179,7 @@ export class VivaClient {
     )
   }
 
-  async cancelOrder(orderCode: number): Promise<void> {
+  async cancelOrder(orderCode: string): Promise<void> {
     try {
       await this.oauthFetch(
         `${this.endpoints.api}/checkout/v2/orders/${orderCode}`,
@@ -238,14 +255,25 @@ export class VivaClient {
     url: string,
     init: RequestInit & { idempotencyKey?: string }
   ): Promise<Response> {
-    const token = await this.getAccessToken()
-    const headers = new Headers(init.headers)
-    headers.set("Authorization", `Bearer ${token}`)
-    if (init.idempotencyKey) {
-      headers.set("Idempotency-Key", init.idempotencyKey)
+    const doFetch = async () => {
+      const token = await this.getAccessToken()
+      const headers = new Headers(init.headers)
+      headers.set("Authorization", `Bearer ${token}`)
+      if (init.idempotencyKey) {
+        headers.set("Idempotency-Key", init.idempotencyKey)
+      }
+      return fetch(url, { ...init, headers })
     }
 
-    const res = await fetch(url, { ...init, headers })
+    let res = await doFetch()
+
+    // Viva can revoke tokens before their advertised expiry. On a 401
+    // clear the cache and retry exactly once with a fresh token.
+    if (res.status === 401) {
+      this.tokenCache = null
+      res = await doFetch()
+    }
+
     if (!res.ok) {
       const text = await res.text()
       throw new MedusaError(

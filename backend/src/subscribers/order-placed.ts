@@ -1,4 +1,4 @@
-import { Modules } from '@medusajs/framework/utils'
+import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { INotificationModuleService, IOrderModuleService, Logger } from '@medusajs/framework/types'
 import { SubscriberArgs, SubscriberConfig } from '@medusajs/medusa'
 import { EmailTemplates } from '../modules/email-notifications/templates'
@@ -11,6 +11,7 @@ export default async function orderPlacedHandler({
 }: SubscriberArgs<{ id: string }>) {
   const notificationModuleService: INotificationModuleService = container.resolve(Modules.NOTIFICATION)
   const orderModuleService: IOrderModuleService = container.resolve(Modules.ORDER)
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const logger: Logger = container.resolve('logger')
 
   try {
@@ -24,14 +25,23 @@ export default async function orderPlacedHandler({
     }
 
     // Only send the confirmation once payment has actually been captured.
-    // In the Viva Smart Checkout redirect flow, order.placed fires before
-    // the webhook captures the payment; the payment-captured subscriber
-    // sends the email in that case. In the webhook-first flow, the order
-    // is created after capture and this branch sends it.
-    const paymentStatus = (order as { payment_status?: string }).payment_status
-    if (paymentStatus !== 'captured') {
+    // `order.payment_status` is often undefined at the time this subscriber
+    // fires because the order/payment link is still committing, so look at
+    // the linked payment collection directly via query.graph for a
+    // reliable read.
+    const { data: paymentCollections } = await query.graph({
+      entity: 'payment_collection',
+      filters: { order_id: data.id },
+      fields: ['id', 'status', 'captured_amount'],
+    })
+    const paymentCollection = paymentCollections?.[0]
+    const isPaid =
+      paymentCollection?.status === 'completed' ||
+      Number(paymentCollection?.captured_amount ?? 0) > 0
+
+    if (!isPaid) {
       logger.info(
-        `order.placed: order ${order.id} payment_status=${paymentStatus}; deferring email to payment.captured`
+        `order.placed: order ${order.id} payment_collection status=${paymentCollection?.status ?? 'missing'}; deferring email to payment.captured`
       )
       return
     }

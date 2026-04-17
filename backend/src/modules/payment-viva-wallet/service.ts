@@ -35,7 +35,9 @@ type InjectedDependencies = {
 }
 
 type SessionData = {
-  orderCode?: number
+  // orderCode is a string: Viva's 16-digit codes can exceed JS
+  // MAX_SAFE_INTEGER once the merchant is long-lived.
+  orderCode?: string
   transactionId?: string
   checkoutUrl?: string
   status?: VivaTransaction["StatusId"]
@@ -43,9 +45,12 @@ type SessionData = {
   currency?: string
 }
 
+// Status codes from https://developer.viva.com/integration-reference/response-codes/
 const PAID_STATUSES: Array<VivaTransaction["StatusId"]> = ["F"]
-const AUTHORIZED_STATUSES: Array<VivaTransaction["StatusId"]> = ["A"]
+const AUTHORIZED_STATUSES: Array<VivaTransaction["StatusId"]> = ["A", "P"]
 const FAILED_STATUSES: Array<VivaTransaction["StatusId"]> = ["E", "X", "C"]
+const REFUNDED_STATUSES: Array<VivaTransaction["StatusId"]> = ["R"]
+// "M" = maintenance / card tokenised awaiting capture — treat as pending.
 
 class VivaPaymentProviderService extends AbstractPaymentProvider<VivaOptions> {
   static identifier = "viva-wallet"
@@ -78,6 +83,18 @@ class VivaPaymentProviderService extends AbstractPaymentProvider<VivaOptions> {
   ): Promise<InitiatePaymentOutput> {
     const amountCents = this.toCents(input.amount)
     const customer = input.context?.customer
+    // Pull country from the billing address if present so Viva can apply
+    // the right 3DS exemptions and surface country-specific methods.
+    const billingAddress = (customer as { billing_address?: { country_code?: string | null } } | undefined)
+      ?.billing_address
+    const countryCode = billingAddress?.country_code
+      ? billingAddress.country_code.toUpperCase()
+      : undefined
+
+    const backendUrl = process.env.BACKEND_URL ?? process.env.MEDUSA_BACKEND_URL
+    const webhookUrl = backendUrl
+      ? `${backendUrl.replace(/\/$/, "")}/webhooks/viva-wallet`
+      : undefined
 
     const result = await this.client_.createOrder({
       amountCents,
@@ -89,9 +106,11 @@ class VivaPaymentProviderService extends AbstractPaymentProvider<VivaOptions> {
               .filter(Boolean)
               .join(" ") || undefined,
             phone: customer.phone ?? undefined,
+            countryCode,
           }
         : undefined,
       idempotencyKey: input.context?.idempotency_key,
+      webhookUrl,
     })
 
     const data: SessionData = {
@@ -102,7 +121,7 @@ class VivaPaymentProviderService extends AbstractPaymentProvider<VivaOptions> {
     }
 
     return {
-      id: String(result.orderCode),
+      id: result.orderCode,
       data: data as unknown as Record<string, unknown>,
     }
   }
@@ -155,6 +174,28 @@ class VivaPaymentProviderService extends AbstractPaymentProvider<VivaOptions> {
     }
 
     const tx = await this.client_.getTransaction(transactionId)
+
+    // Security check: reject if the browser-injected transactionId doesn't
+    // belong to the orderCode we created, or if the amount doesn't match
+    // what we asked Viva to charge. Prevents a crafted return URL from
+    // settling a cart using some other customer's paid transaction.
+    if (data?.orderCode && tx.OrderCode && String(tx.OrderCode) !== String(data.orderCode)) {
+      this.logger_.warn(
+        `Viva: tx ${transactionId} orderCode ${tx.OrderCode} does not match session orderCode ${data.orderCode}`
+      )
+      return { data: (data ?? {}) as Record<string, unknown>, status: "canceled" }
+    }
+    if (
+      typeof data?.amount === "number" &&
+      typeof tx.Amount === "number" &&
+      Math.abs(tx.Amount - data.amount) > 1 // allow 1-cent rounding
+    ) {
+      this.logger_.warn(
+        `Viva: tx ${transactionId} amount ${tx.Amount} does not match session amount ${data.amount}`
+      )
+      return { data: (data ?? {}) as Record<string, unknown>, status: "canceled" }
+    }
+
     const nextData: SessionData = {
       ...(data ?? {}),
       transactionId,
