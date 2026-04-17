@@ -1,0 +1,36 @@
+{
+  "name": "inovix-backend",
+  "mode": "vendored",
+  "dependencies": {
+    "planetscale/database-skills": {
+      "version": "b156f4ca73c03d0350438bfd042331aaef6eec77",
+      "source": "https://github.com/planetscale/database-skills",
+      "include": {
+        "skills": [
+          "postgres"
+        ]
+      }
+    },
+    "resend/resend-skills": {
+      "version": "1a3fdfde1b8877ed1123f6afed20d4aa371d061a",
+      "source": "https://github.com/resend/resend-skills",
+      "include": {
+        "skills": [
+          "resend"
+        ]
+      }
+    },
+    "wshobson/agents": {
+      "version": "9a8ad818326b9e3d3492ee5563a2f6cf44af1c81",
+      "source": "https://github.com/wshobson/agents",
+      "include": {
+        "skills": [
+          "gdpr-data-handling"
+        ]
+      }
+    },
+    "creativecodeology/react-email": {
+      "version": "0.1.0"
+    }
+  }
+}

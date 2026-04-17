@@ -1,4 +1,4 @@
-import { Button, Link, Section, Text, Img, Hr } from '@react-email/components'
+import { Button, Link, Section, Text, Hr } from '@react-email/components'
 import { Base } from './base'
 
 /**
@@ -33,20 +33,18 @@ export const isInviteUserData = (data: any): data is InviteUserEmailProps =>
  */
 export const InviteUserEmail = ({
   inviteLink,
-  preview = `You've been invited to Medusa!`,
+  preview = `You've been invited to the Inovix admin`,
 }: InviteUserEmailProps) => {
   return (
-    <Base preview={preview}>
-      <Section className="mt-[32px]">
-        <Img
-          src="https://user-images.githubusercontent.com/59018053/229103275-b5e482bb-4601-46e6-8142-244f531cebdb.svg"
-          alt="Medusa"
-          className="mx-auto w-28"
-        />
+    <Base preview={preview} showCustomerFooter={false}>
+      <Section className="mt-[24px] text-center">
+        <Text className="text-black text-[18px] font-semibold leading-[28px] m-0">
+          Inovix admin
+        </Text>
       </Section>
       <Section className="text-center">
         <Text className="text-black text-[14px] leading-[24px]">
-          You&apos;ve been invited to be an administrator on <strong>Medusa</strong>.
+          You&apos;ve been invited to be an administrator on <strong>Inovix</strong>.
         </Text>
         <Section className="mt-4 mb-[32px]">
           <Button

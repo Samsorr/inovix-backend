@@ -137,7 +137,11 @@ export class VivaClient {
     amountCents: number,
     idempotencyKey?: string
   ): Promise<{ TransactionId: string }> {
-    const url = `${this.endpoints.api}/api/transactions/${encodeURIComponent(transactionId)}?amount=${amountCents}&actionUser=Medusa`
+    const params = new URLSearchParams({
+      amount: String(amountCents),
+      actionUser: "Medusa",
+    })
+    const url = `${this.endpoints.api}/api/transactions/${encodeURIComponent(transactionId)}?${params}`
     const res = await this.basicAuthFetch(url, {
       method: "DELETE",
       idempotencyKey,

@@ -7,12 +7,21 @@ jest.mock('@medusajs/framework/utils', () => ({
 
 import { GET } from '../route'
 
-function mockRequest(overrides = {}) {
+const mockLogger = {
+  error: jest.fn(),
+  warn: jest.fn(),
+  info: jest.fn(),
+}
+
+function mockRequest(apiKeyService: unknown) {
   return {
     scope: {
-      resolve: jest.fn(),
+      resolve: jest.fn((key: string) => {
+        if (key === 'logger') return mockLogger
+        if (key === 'apiKeyModuleService') return apiKeyService
+        return undefined
+      }),
     },
-    ...overrides,
   } as unknown as MedusaRequest
 }
 
@@ -25,17 +34,19 @@ function mockResponse() {
 }
 
 describe('GET /key-exchange', () => {
-  it('returns publishableApiKey when a "Webshop" key exists', async () => {
-    const req = mockRequest()
-    const res = mockResponse()
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
 
+  it('returns publishableApiKey when a "Webshop" key exists', async () => {
     const apiKeyService = {
       listApiKeys: jest.fn().mockResolvedValue([
         { title: 'Webshop', token: 'pk_test_abc123' },
         { title: 'Other', token: 'pk_test_other' },
       ]),
     }
-    ;(req.scope.resolve as jest.Mock).mockReturnValue(apiKeyService)
+    const req = mockRequest(apiKeyService)
+    const res = mockResponse()
 
     await GET(req, res)
 
@@ -44,15 +55,13 @@ describe('GET /key-exchange', () => {
   })
 
   it('returns an empty object when no "Webshop" key is found', async () => {
-    const req = mockRequest()
-    const res = mockResponse()
-
     const apiKeyService = {
       listApiKeys: jest.fn().mockResolvedValue([
         { title: 'Admin', token: 'pk_admin' },
       ]),
     }
-    ;(req.scope.resolve as jest.Mock).mockReturnValue(apiKeyService)
+    const req = mockRequest(apiKeyService)
+    const res = mockResponse()
 
     await GET(req, res)
 
@@ -60,31 +69,31 @@ describe('GET /key-exchange', () => {
   })
 
   it('returns an empty object when the API key list is empty', async () => {
-    const req = mockRequest()
-    const res = mockResponse()
-
     const apiKeyService = {
       listApiKeys: jest.fn().mockResolvedValue([]),
     }
-    ;(req.scope.resolve as jest.Mock).mockReturnValue(apiKeyService)
+    const req = mockRequest(apiKeyService)
+    const res = mockResponse()
 
     await GET(req, res)
 
     expect(res.json).toHaveBeenCalledWith({})
   })
 
-  it('returns 500 with the error message when the service throws', async () => {
-    const req = mockRequest()
-    const res = mockResponse()
-
+  it('returns 500 with a generic message and logs the underlying error', async () => {
     const apiKeyService = {
       listApiKeys: jest.fn().mockRejectedValue(new Error('Database connection failed')),
     }
-    ;(req.scope.resolve as jest.Mock).mockReturnValue(apiKeyService)
+    const req = mockRequest(apiKeyService)
+    const res = mockResponse()
 
     await GET(req, res)
 
     expect(res.status).toHaveBeenCalledWith(500)
-    expect(res.json).toHaveBeenCalledWith({ error: 'Database connection failed' })
+    // Internal error details are not leaked to the client.
+    expect(res.json).toHaveBeenCalledWith({ error: 'Failed to retrieve API key' })
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.stringContaining('Database connection failed')
+    )
   })
 })

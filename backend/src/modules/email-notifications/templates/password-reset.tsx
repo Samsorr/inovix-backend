@@ -1,4 +1,4 @@
-import { Button, Link, Section, Text, Hr } from '@react-email/components'
+import { Button, Link, Section, Text } from '@react-email/components'
 import * as React from 'react'
 import { Base } from './base'
 
@@ -80,8 +80,9 @@ export const PasswordResetEmail: React.FC<PasswordResetEmailProps> & {
           </Link>
         </Text>
       </Section>
-      <Hr className="border border-solid border-[#eaeaea] my-[26px] mx-0 w-full" />
-      <Text className="text-[#666666] text-[12px] leading-[24px]">{t.ignore}</Text>
+      <Section>
+        <Text className="text-[#666666] text-[12px] leading-[20px]">{t.ignore}</Text>
+      </Section>
     </Base>
   )
 }

@@ -34,13 +34,9 @@ describe('order-placed subscriber', () => {
     items: [
       { id: 'item-1', title: 'BPC-157', product_title: 'Peptide', quantity: 1, unit_price: 49.99 },
     ],
-    shipping_address: { id: 'addr_1' },
+    shipping_address: mockShippingAddress,
     summary: { raw_current_order_total: { value: 49.99 } },
     created_at: new Date().toISOString(),
-  }
-
-  const mockOrderAddressService = {
-    retrieve: jest.fn().mockResolvedValue(mockShippingAddress),
   }
 
   const mockNotificationService = {
@@ -49,19 +45,26 @@ describe('order-placed subscriber', () => {
 
   const mockOrderService = {
     retrieveOrder: jest.fn().mockResolvedValue(mockOrder),
-    orderAddressService_: mockOrderAddressService,
+  }
+
+  const mockLogger = {
+    error: jest.fn(),
+    warn: jest.fn(),
+    info: jest.fn(),
   }
 
   const mockContainer = {
     resolve: jest.fn((key: string) => {
       if (key === 'notificationModuleService') return mockNotificationService
       if (key === 'orderModuleService') return mockOrderService
+      if (key === 'logger') return mockLogger
       return undefined
     }),
   }
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockOrderService.retrieveOrder.mockResolvedValue(mockOrder)
   })
 
   describe('config', () => {
@@ -82,13 +85,19 @@ describe('order-placed subscriber', () => {
       })
     })
 
-    it('retrieves the shipping address using the order shipping_address id', async () => {
+    it('uses the loaded shipping_address relation directly', async () => {
       await orderPlacedHandler({
         event: { data: { id: 'order_abc' } },
         container: mockContainer,
       } as any)
 
-      expect(mockOrderAddressService.retrieve).toHaveBeenCalledWith('addr_1')
+      expect(mockNotificationService.createNotifications).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            shippingAddress: mockShippingAddress,
+          }),
+        })
+      )
     })
 
     it('creates a notification with correct email, template, order data, and shippingAddress', async () => {
@@ -103,18 +112,30 @@ describe('order-placed subscriber', () => {
         template: 'order-placed',
         data: {
           emailOptions: {
-            replyTo: 'info@example.com',
-            subject: 'Your order has been placed',
+            subject: 'Bestelling ontvangen | Inovix ORD-001',
           },
           order: mockOrder,
           shippingAddress: mockShippingAddress,
-          preview: 'Thank you for your order!',
+          preview: 'Bedankt voor uw bestelling bij Inovix',
         },
       })
     })
 
+    it('skips notification and warns when shipping_address is missing', async () => {
+      mockOrderService.retrieveOrder.mockResolvedValueOnce({ ...mockOrder, shipping_address: null })
+
+      await orderPlacedHandler({
+        event: { data: { id: 'order_abc' } },
+        container: mockContainer,
+      } as any)
+
+      expect(mockNotificationService.createNotifications).not.toHaveBeenCalled()
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('order_abc')
+      )
+    })
+
     it('catches and logs errors from the notification service', async () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation()
       const error = new Error('Email service down')
       mockNotificationService.createNotifications.mockRejectedValueOnce(error)
 
@@ -123,11 +144,9 @@ describe('order-placed subscriber', () => {
         container: mockContainer,
       } as any)
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Error sending order confirmation notification:',
-        error
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Email service down')
       )
-      consoleSpy.mockRestore()
     })
   })
 })

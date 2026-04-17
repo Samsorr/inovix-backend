@@ -33,10 +33,17 @@ describe('invite-created subscriber', () => {
     retrieveInvite: jest.fn().mockResolvedValue(mockInvite),
   }
 
+  const mockLogger = {
+    error: jest.fn(),
+    warn: jest.fn(),
+    info: jest.fn(),
+  }
+
   const mockContainer = {
     resolve: jest.fn((key: string) => {
       if (key === 'notificationModuleService') return mockNotificationService
       if (key === 'userModuleService') return mockUserService
+      if (key === 'logger') return mockLogger
       return undefined
     }),
   }
@@ -73,17 +80,15 @@ describe('invite-created subscriber', () => {
         template: 'invite-user',
         data: {
           emailOptions: {
-            replyTo: 'info@example.com',
-            subject: "You've been invited to Medusa!",
+            subject: "You've been invited to the Inovix admin",
           },
           inviteLink: 'https://api.example.com/app/invite?token=token_abc123',
-          preview: 'The administration dashboard awaits...',
+          preview: 'The Inovix admin dashboard awaits...',
         },
       })
     })
 
     it('catches and logs errors from the notification service', async () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation()
       const error = new Error('Notification service unavailable')
       mockNotificationService.createNotifications.mockRejectedValueOnce(error)
 
@@ -92,8 +97,9 @@ describe('invite-created subscriber', () => {
         container: mockContainer,
       } as any)
 
-      expect(consoleSpy).toHaveBeenCalledWith(error)
-      consoleSpy.mockRestore()
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Notification service unavailable')
+      )
     })
   })
 })

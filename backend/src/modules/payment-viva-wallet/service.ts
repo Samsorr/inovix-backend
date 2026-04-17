@@ -110,8 +110,15 @@ class VivaPaymentProviderService extends AbstractPaymentProvider<VivaOptions> {
   async updatePayment(
     input: UpdatePaymentInput
   ): Promise<UpdatePaymentOutput> {
-    // Viva orders are immutable once created; re-initiate so the hosted checkout
-    // reflects the new total.
+    const incoming = (input.data as SessionData | undefined) ?? {}
+
+    // The storefront's Viva return handler calls updatePaymentSession with the
+    // transactionId from Viva's redirect. Preserve it instead of creating a new
+    // Viva order — we only re-initiate for amount changes.
+    if (incoming.transactionId) {
+      return { data: incoming as Record<string, unknown> }
+    }
+
     const reinitiated = await this.initiatePayment({
       amount: input.amount,
       currency_code: input.currency_code,

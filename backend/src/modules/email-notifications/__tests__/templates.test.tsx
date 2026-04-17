@@ -18,6 +18,8 @@ jest.mock('@react-email/components', () => ({
   Preview: ({ children }: any) => <>{children}</>,
   Tailwind: ({ children }: any) => <>{children}</>,
   Head: () => null,
+  Row: ({ children }: any) => <div>{children}</div>,
+  Column: ({ children }: any) => <span>{children}</span>,
 }), { virtual: true })
 
 jest.mock('@medusajs/framework/utils', () => ({

@@ -1,0 +1,11 @@
+{
+  "name": "creativecodeology/react-email",
+  "version": "0.1.0",
+  "private": false,
+  "summary": "Build email templates with @react-email/components (v1.0+) and render them server-side for Resend or any email provider. Use this skill whenever creating, editing, debugging, or reviewing React Email templates — even for simple tasks like 'add a button to the welcome email' or 'create a password reset email'. The skill contains critical email client compatibility rules (no flexbox, no rem units, pixelBasedPreset requirement, Outlook conditional comments) that prevent broken rendering in production. Triggers on: React Email components, email templates, @react-email/components imports, Tailwind in emails, email layout, email styling, Html/Head/Body/Container/Section/Row/Column/Text/Button/Img/Link/Hr/Preview components, render() from @react-email/render, PreviewProps, pixelBasedPreset, email client compatibility, Outlook rendering, Gmail rendering.",
+  "skills": {
+    "react-email": {
+      "path": "SKILL.md"
+    }
+  }
+}

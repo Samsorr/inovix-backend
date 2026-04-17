@@ -1,0 +1,19 @@
+{
+  "name": "resend/resend-skills",
+  "version": "1a3fdfde1b8877ed1123f6afed20d4aa371d061a",
+  "summary": "Auto-generated tile from GitHub (5 skills)",
+  "private": true,
+  "skills": {
+    "resend": {
+      "path": "skills/resend/SKILL.md"
+    }
+  },
+  "excludes": {
+    "skills": [
+      "agent-email-inbox",
+      "email-best-practices",
+      "react-email",
+      "resend-cli"
+    ]
+  }
+}

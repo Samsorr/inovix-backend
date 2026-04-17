@@ -1,4 +1,4 @@
-import { INotificationModuleService } from '@medusajs/framework/types'
+import { INotificationModuleService, Logger } from '@medusajs/framework/types'
 import { Modules } from '@medusajs/framework/utils'
 import { SubscriberArgs, SubscriberConfig } from '@medusajs/framework'
 import { BACKEND_URL, STOREFRONT_URL } from '../lib/constants'
@@ -17,6 +17,7 @@ export default async function authPasswordResetHandler({
   const notificationModuleService: INotificationModuleService = container.resolve(
     Modules.NOTIFICATION
   )
+  const logger: Logger = container.resolve('logger')
 
   const { entity_id: email, actor_type, token } = data
 
@@ -45,7 +46,7 @@ export default async function authPasswordResetHandler({
       },
     })
   } catch (error) {
-    console.error('Error sending password reset notification:', error)
+    logger.error(`auth.password_reset: failed to send notification: ${(error as Error).message}`)
   }
 }
 
