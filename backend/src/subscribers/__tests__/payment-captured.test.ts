@@ -1,20 +1,22 @@
 jest.mock('../../modules/email-notifications/templates', () => ({
   EmailTemplates: {
-    INVITE_USER: 'invite-user',
     ORDER_PLACED: 'order-placed',
   },
 }))
 
 jest.mock('@medusajs/framework/utils', () => ({
+  ContainerRegistrationKeys: {
+    QUERY: 'query',
+    LOGGER: 'logger',
+  },
   Modules: {
     NOTIFICATION: 'notificationModuleService',
-    ORDER: 'orderModuleService',
   },
 }))
 
-import orderPlacedHandler, { config } from '../order-placed'
+import paymentCapturedHandler, { config } from '../payment-captured'
 
-describe('order-placed subscriber', () => {
+describe('payment-captured subscriber', () => {
   const mockShippingAddress = {
     id: 'addr_1',
     first_name: 'John',
@@ -31,7 +33,6 @@ describe('order-placed subscriber', () => {
     email: 'buyer@example.com',
     display_id: 'ORD-001',
     currency_code: 'EUR',
-    payment_status: 'captured',
     items: [
       { id: 'item-1', title: 'BPC-157', product_title: 'Peptide', quantity: 1, unit_price: 49.99 },
     ],
@@ -44,8 +45,10 @@ describe('order-placed subscriber', () => {
     createNotifications: jest.fn().mockResolvedValue(undefined),
   }
 
-  const mockOrderService = {
-    retrieveOrder: jest.fn().mockResolvedValue(mockOrder),
+  const mockQuery = {
+    graph: jest.fn().mockResolvedValue({
+      data: [{ id: 'pay_1', payment_collection: { id: 'pc_1', order: mockOrder } }],
+    }),
   }
 
   const mockLogger = {
@@ -57,7 +60,7 @@ describe('order-placed subscriber', () => {
   const mockContainer = {
     resolve: jest.fn((key: string) => {
       if (key === 'notificationModuleService') return mockNotificationService
-      if (key === 'orderModuleService') return mockOrderService
+      if (key === 'query') return mockQuery
       if (key === 'logger') return mockLogger
       return undefined
     }),
@@ -65,30 +68,40 @@ describe('order-placed subscriber', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
-    mockOrderService.retrieveOrder.mockResolvedValue(mockOrder)
+    mockQuery.graph.mockResolvedValue({
+      data: [{ id: 'pay_1', payment_collection: { id: 'pc_1', order: mockOrder } }],
+    })
   })
 
   describe('config', () => {
-    it('subscribes to the order.placed event', () => {
-      expect(config.event).toBe('order.placed')
+    it('subscribes to the payment.captured event', () => {
+      expect(config.event).toBe('payment.captured')
     })
   })
 
   describe('handler', () => {
-    it('retrieves the order by data.id with the correct relations', async () => {
-      await orderPlacedHandler({
-        event: { data: { id: 'order_abc' } },
+    it('queries the payment graph to resolve the order', async () => {
+      await paymentCapturedHandler({
+        event: { data: { id: 'pay_1' } },
         container: mockContainer,
       } as any)
 
-      expect(mockOrderService.retrieveOrder).toHaveBeenCalledWith('order_abc', {
-        relations: ['items', 'summary', 'shipping_address'],
-      })
+      expect(mockQuery.graph).toHaveBeenCalledWith(
+        expect.objectContaining({
+          entity: 'payment',
+          filters: { id: 'pay_1' },
+          fields: expect.arrayContaining([
+            'id',
+            'payment_collection.order.id',
+            'payment_collection.order.shipping_address.*',
+          ]),
+        })
+      )
     })
 
-    it('sends the confirmation with idempotency_key when payment is captured', async () => {
-      await orderPlacedHandler({
-        event: { data: { id: 'order_abc' } },
+    it('sends the confirmation with idempotency_key scoped to the order', async () => {
+      await paymentCapturedHandler({
+        event: { data: { id: 'pay_1' } },
         container: mockContainer,
       } as any)
 
@@ -100,7 +113,7 @@ describe('order-placed subscriber', () => {
           idempotency_key: 'order-confirmed-order_abc',
           resource_id: 'order_abc',
           resource_type: 'order',
-          trigger_type: 'order.placed',
+          trigger_type: 'payment.captured',
           data: expect.objectContaining({
             emailOptions: expect.objectContaining({
               subject: 'Bestelling bevestigd | Inovix ORD-001',
@@ -113,28 +126,34 @@ describe('order-placed subscriber', () => {
       )
     })
 
-    it('defers to payment.captured when payment_status is not captured', async () => {
-      mockOrderService.retrieveOrder.mockResolvedValueOnce({
-        ...mockOrder,
-        payment_status: 'authorized',
+    it('skips notification and warns when no order is linked yet', async () => {
+      mockQuery.graph.mockResolvedValueOnce({
+        data: [{ id: 'pay_1', payment_collection: { id: 'pc_1', order: null } }],
       })
 
-      await orderPlacedHandler({
-        event: { data: { id: 'order_abc' } },
+      await paymentCapturedHandler({
+        event: { data: { id: 'pay_1' } },
         container: mockContainer,
       } as any)
 
       expect(mockNotificationService.createNotifications).not.toHaveBeenCalled()
-      expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining('deferring email to payment.captured')
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('no order found for payment pay_1')
       )
     })
 
     it('skips notification and warns when shipping_address is missing', async () => {
-      mockOrderService.retrieveOrder.mockResolvedValueOnce({ ...mockOrder, shipping_address: null })
+      mockQuery.graph.mockResolvedValueOnce({
+        data: [
+          {
+            id: 'pay_1',
+            payment_collection: { id: 'pc_1', order: { ...mockOrder, shipping_address: null } },
+          },
+        ],
+      })
 
-      await orderPlacedHandler({
-        event: { data: { id: 'order_abc' } },
+      await paymentCapturedHandler({
+        event: { data: { id: 'pay_1' } },
         container: mockContainer,
       } as any)
 
@@ -148,8 +167,8 @@ describe('order-placed subscriber', () => {
       const error = new Error('Email service down')
       mockNotificationService.createNotifications.mockRejectedValueOnce(error)
 
-      await orderPlacedHandler({
-        event: { data: { id: 'order_abc' } },
+      await paymentCapturedHandler({
+        event: { data: { id: 'pay_1' } },
         container: mockContainer,
       } as any)
 

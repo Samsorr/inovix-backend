@@ -81,6 +81,9 @@ describe('invite-created subscriber', () => {
         data: {
           emailOptions: {
             subject: "You've been invited to the Inovix admin",
+            text: expect.stringContaining(
+              'https://api.example.com/app/invite?token=token_abc123'
+            ),
           },
           inviteLink: 'https://api.example.com/app/invite?token=token_abc123',
           preview: 'The Inovix admin dashboard awaits...',

@@ -1,5 +1,6 @@
 import { defineMiddlewares } from "@medusajs/framework/http"
 
+import { passwordChangedNotifier } from "../lib/password-changed-notifier"
 import { rateLimit } from "../lib/rate-limiter"
 
 const MINUTE = 60 * 1000
@@ -16,6 +17,11 @@ export default defineMiddlewares({
             "Te veel aanmeldpogingen. Probeer het over enkele minuten opnieuw.",
         }),
       ],
+    },
+    {
+      matcher: "/auth/:actor/emailpass/update",
+      method: ["POST"],
+      middlewares: [passwordChangedNotifier()],
     },
     {
       matcher: "/admin/*",
