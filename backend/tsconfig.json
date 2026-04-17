@@ -13,7 +13,6 @@
     "sourceMap": false,
     "outDir": "./.medusa/server",
     "rootDir": "./",
-    "baseUrl": ".",
     "paths": {
       "*": ["./src/*"]
     },
