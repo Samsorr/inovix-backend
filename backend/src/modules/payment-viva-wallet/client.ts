@@ -117,15 +117,49 @@ export class VivaClient {
       `${this.endpoints.api}/checkout/v2/transactions/${encodeURIComponent(transactionId)}`,
       { method: "GET" }
     )
-    const data = (await res.json()) as { Transactions?: VivaTransaction[] }
-    const tx = data.Transactions?.[0]
-    if (!tx) {
-      throw new MedusaError(
-        MedusaError.Types.NOT_FOUND,
-        `Viva transaction ${transactionId} not found`
-      )
+    const raw = (await res.json()) as Record<string, unknown>
+
+    // Two response shapes exist: the legacy basic-auth shape wraps matches
+    // in `{Transactions: [{StatusId, Amount, Currency, ...}]}`; the OAuth
+    // shape returns a single object with lowercase keys (`statusId`,
+    // `amount`, `currencyCode`). Normalise both to VivaTransaction.
+    const legacy = raw as { Transactions?: VivaTransaction[] }
+    if (Array.isArray(legacy.Transactions) && legacy.Transactions[0]) {
+      return legacy.Transactions[0]
     }
-    return tx
+
+    if (typeof raw.statusId === "string") {
+      const tx = raw as {
+        statusId: VivaTransaction["StatusId"]
+        amount: number
+        currencyCode: number | string
+        orderCode: number
+        transactionId?: string
+        merchantTrns?: string | null
+        customerTrns?: string | null
+        email?: string | null
+        fullName?: string | null
+      }
+      return {
+        StatusId: tx.statusId,
+        // OAuth shape returns amount in major units (e.g. 5.10 EUR); the
+        // legacy basic-auth shape returns cents. Normalise to cents so our
+        // service's reconciliation logic stays consistent.
+        Amount: Math.round(Number(tx.amount) * 100),
+        Currency: this.currencyNumericToIso(tx.currencyCode),
+        OrderCode: tx.orderCode,
+        TransactionId: tx.transactionId ?? transactionId,
+        MerchantTrns: tx.merchantTrns ?? null,
+        CustomerTrns: tx.customerTrns ?? null,
+        Email: tx.email ?? null,
+        FullName: tx.fullName ?? null,
+      }
+    }
+
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      `Viva transaction ${transactionId} not found`
+    )
   }
 
   async cancelOrder(orderCode: number): Promise<void> {
@@ -247,22 +281,7 @@ export class VivaClient {
   }
 
   private currencyCodeToIso4217(code: string): number {
-    const map: Record<string, number> = {
-      EUR: 978,
-      USD: 840,
-      GBP: 826,
-      CHF: 756,
-      DKK: 208,
-      SEK: 752,
-      NOK: 578,
-      PLN: 985,
-      RON: 946,
-      HUF: 348,
-      CZK: 203,
-      BGN: 975,
-      HRK: 191,
-    }
-    const numeric = map[code.toUpperCase()]
+    const numeric = CURRENCY_ISO_NUMERIC[code.toUpperCase()]
     if (!numeric) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
@@ -271,4 +290,28 @@ export class VivaClient {
     }
     return numeric
   }
+
+  private currencyNumericToIso(code: number | string): string {
+    const numeric = typeof code === "number" ? code : Number(code)
+    const alpha = Object.entries(CURRENCY_ISO_NUMERIC).find(
+      ([, n]) => n === numeric
+    )?.[0]
+    return alpha ?? String(code)
+  }
+}
+
+const CURRENCY_ISO_NUMERIC: Record<string, number> = {
+  EUR: 978,
+  USD: 840,
+  GBP: 826,
+  CHF: 756,
+  DKK: 208,
+  SEK: 752,
+  NOK: 578,
+  PLN: 985,
+  RON: 946,
+  HUF: 348,
+  CZK: 203,
+  BGN: 975,
+  HRK: 191,
 }
