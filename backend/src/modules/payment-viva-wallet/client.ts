@@ -110,7 +110,10 @@ export class VivaClient {
   }
 
   async getTransaction(transactionId: string): Promise<VivaTransaction> {
-    const res = await this.basicAuthFetch(
+    // Use OAuth (Smart Checkout credentials) rather than basic auth. Both
+    // are accepted by Viva's checkout v2 endpoint, and OAuth works reliably
+    // in demo and prod without depending on the shorter basic-auth API key.
+    const res = await this.oauthFetch(
       `${this.endpoints.api}/checkout/v2/transactions/${encodeURIComponent(transactionId)}`,
       { method: "GET" }
     )
