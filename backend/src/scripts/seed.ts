@@ -241,8 +241,9 @@ export default async function seedDemoData({ container }: ExecArgs) {
     },
   });
 
+  // metadata is on the ShippingOption entity but missing from CreateShippingOptionDTO typing in @medusajs/types 2.12.1; runtime persists it.
   await createShippingOptionsWorkflow(container).run({
-    input: [
+    input: ([
       {
         name: "Standard Shipping",
         price_type: "flat",
@@ -330,7 +331,7 @@ export default async function seedDemoData({ container }: ExecArgs) {
           },
         ],
       },
-    ],
+    ] as any),
   });
   logger.info("Finished seeding fulfillment data.");
 
