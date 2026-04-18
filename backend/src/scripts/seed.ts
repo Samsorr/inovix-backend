@@ -254,6 +254,11 @@ export default async function seedDemoData({ container }: ExecArgs) {
           description: "Ship in 2-3 days.",
           code: "standard",
         },
+        metadata: {
+          carrier: "PostNL",
+          delivery_estimate: "1 tot 2 werkdagen",
+          tracked: true,
+        },
         prices: [
           {
             currency_code: "usd",
@@ -291,6 +296,12 @@ export default async function seedDemoData({ container }: ExecArgs) {
           label: "Express",
           description: "Ship in 24 hours.",
           code: "express",
+        },
+        metadata: {
+          carrier: "PostNL",
+          delivery_estimate: "Volgende werkdag",
+          tracked: true,
+          insured: true,
         },
         prices: [
           {
