@@ -15,6 +15,12 @@ fs.copyFileSync(
   path.join(MEDUSA_SERVER_PATH, 'pnpm-lock.yaml')
 );
 
+// Copy patches/ so pnpm.patchedDependencies resolve during the runtime install
+const patchesSrc = path.join(process.cwd(), 'patches');
+if (fs.existsSync(patchesSrc)) {
+  fs.cpSync(patchesSrc, path.join(MEDUSA_SERVER_PATH, 'patches'), { recursive: true });
+}
+
 // Copy .env if it exists
 const envPath = path.join(process.cwd(), '.env');
 if (fs.existsSync(envPath)) {

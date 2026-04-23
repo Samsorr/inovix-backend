@@ -1,0 +1,22 @@
+diff --git a/dist/app.js b/dist/app.js
+index a811fb3933518fd9dac5310a9041bea1ef05e688..6290f82a4c9acdbfac4b55d2692b21b92a9261ea 100644
+--- a/dist/app.js
++++ b/dist/app.js
+@@ -106865,7 +106865,7 @@ var init_file_upload = __esm({
+     import_ui55 = require("@medusajs/ui");
+     import_react71 = require("react");
+     import_jsx_runtime77 = require("react/jsx-runtime");
+-    DEFAULT_MAX_FILE_SIZE = 1024 * 1024;
++    DEFAULT_MAX_FILE_SIZE = 25 * 1024 * 1024;
+     FileUpload = ({
+       label,
+       hint,
+@@ -107046,7 +107046,7 @@ var init_upload_media_form_item = __esm({
+               type: "file_too_large",
+               message: t5("products.media.fileTooLarge", {
+                 name: fileNames,
+-                size: "1MB"
++                size: "25MB"
+               })
+             });
+             hasInvalidFile = true;
