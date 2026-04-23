@@ -6,40 +6,104 @@ import {
   Switch,
   Label,
   Button,
+  Text,
   toast,
 } from "@medusajs/ui"
 import { useMemo, useState } from "react"
 
 type BadgeKey = "hplc_tested" | "third_party_verified" | "eu_shipping"
 
-const BADGE_OPTIONS: { key: BadgeKey; label: string; description: string }[] = [
+const BADGE_OPTIONS: {
+  key: BadgeKey
+  label: string
+  storefrontLabel: string
+  dotColor: string
+  when: string
+}[] = [
   {
     key: "hplc_tested",
     label: "HPLC getest",
-    description: "Toon 'HPLC GETEST' badge op de productpagina",
+    storefrontLabel: "HPLC GETEST",
+    dotColor: "#5eead4",
+    when: "Aanvinken als dit product een HPLC-zuiverheidstest heeft ondergaan. Gebruik dit samen met een purity-waarde in de specs.",
   },
   {
     key: "third_party_verified",
     label: "3rd-party verified",
-    description: "Toon '3RD-PARTY VERIFIED' badge op de productpagina",
+    storefrontLabel: "3RD-PARTY VERIFIED",
+    dotColor: "#a78bfa",
+    when: "Aanvinken als er een onafhankelijk lab-rapport (CoA) van een externe partij beschikbaar is. Upload het CoA via het Certificaat-widget hiernaast.",
   },
   {
     key: "eu_shipping",
     label: "EU verzending",
-    description: "Toon 'EU VERZENDING' badge op de productpagina",
+    storefrontLabel: "EU VERZENDING",
+    dotColor: "#a78bfa",
+    when: "Aanvinken voor producten die we vanuit de EU versturen (dus geen douane voor EU-klanten).",
   },
 ]
 
-function readBadges(metadata: Record<string, unknown> | null | undefined): BadgeKey[] {
+function readBadges(
+  metadata: Record<string, unknown> | null | undefined
+): BadgeKey[] {
   const raw = metadata?.badges
   if (!Array.isArray(raw)) return []
   const allowed = new Set<string>(BADGE_OPTIONS.map((b) => b.key))
-  return raw.filter((v): v is BadgeKey => typeof v === "string" && allowed.has(v))
+  return raw.filter(
+    (v): v is BadgeKey => typeof v === "string" && allowed.has(v)
+  )
 }
+
+function readPurity(
+  metadata: Record<string, unknown> | null | undefined
+): number | null {
+  const raw = metadata?.purity
+  const n = typeof raw === "number" ? raw : Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+const PreviewBadge = ({
+  dotColor,
+  children,
+}: {
+  dotColor: string
+  children: React.ReactNode
+}) => (
+  <span
+    style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: "6px",
+      border: "1px solid var(--border-base, #e5e7eb)",
+      background: "var(--bg-subtle, #f6f6f7)",
+      padding: "6px 10px",
+      fontSize: "10px",
+      fontWeight: 500,
+      textTransform: "uppercase",
+      letterSpacing: "0.04em",
+      color: "#0f172a",
+    }}
+  >
+    <span
+      aria-hidden="true"
+      style={{
+        display: "block",
+        width: "6px",
+        height: "6px",
+        background: dotColor,
+      }}
+    />
+    {children}
+  </span>
+)
 
 const ProductBadgesWidget = ({ data }: DetailWidgetProps<AdminProduct>) => {
   const initial = useMemo(
     () => readBadges(data.metadata as Record<string, unknown> | null | undefined),
+    [data.metadata]
+  )
+  const purity = useMemo(
+    () => readPurity(data.metadata as Record<string, unknown> | null | undefined),
     [data.metadata]
   )
   const [selected, setSelected] = useState<BadgeKey[]>(initial)
@@ -72,7 +136,7 @@ const ProductBadgesWidget = ({ data }: DetailWidgetProps<AdminProduct>) => {
       if (!res.ok) {
         throw new Error(`Failed (${res.status})`)
       }
-      toast.success("Badges opgeslagen")
+      toast.success("Trust badges opgeslagen")
     } catch (err) {
       toast.error("Opslaan mislukt", {
         description: err instanceof Error ? err.message : "Onbekende fout",
@@ -84,15 +148,64 @@ const ProductBadgesWidget = ({ data }: DetailWidgetProps<AdminProduct>) => {
 
   return (
     <Container className="divide-y p-0">
-      <div className="flex items-center justify-between px-6 py-4">
-        <Heading level="h2">Trust badges</Heading>
-      </div>
+      {/* Header + explainer */}
       <div className="px-6 py-4">
-        <p className="txt-small text-ui-fg-subtle mb-4">
-          Selecteer welke badges op de productpagina worden getoond. De zuiverheid-badge wordt los
-          beheerd via het <code>purity</code> metadata-veld.
-        </p>
-        <div className="flex flex-col gap-y-4">
+        <Heading level="h2">Trust badges</Heading>
+        <Text size="small" className="text-ui-fg-subtle mt-1">
+          Deze badges verschijnen op de productpagina direct onder de titel.
+          Ze bouwen vertrouwen op bij onderzoekers. Zet alleen aan wat echt van
+          toepassing is op dit product | misleidende claims kosten je klanten.
+        </Text>
+      </div>
+
+      {/* Live preview */}
+      <div className="px-6 py-4">
+        <Text size="xsmall" weight="plus" className="text-ui-fg-muted mb-2">
+          Zo ziet het eruit op de site
+        </Text>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "8px",
+            padding: "12px",
+            background: "var(--bg-base, #fff)",
+            border: "1px solid var(--border-base, #e5e7eb)",
+            borderRadius: "4px",
+            minHeight: "48px",
+            alignItems: "center",
+          }}
+        >
+          {purity != null && (
+            <PreviewBadge dotColor="#5eead4">
+              ≥{purity}% ZUIVERHEID
+            </PreviewBadge>
+          )}
+          {selected.map((key) => {
+            const opt = BADGE_OPTIONS.find((o) => o.key === key)!
+            return (
+              <PreviewBadge key={key} dotColor={opt.dotColor}>
+                {opt.storefrontLabel}
+              </PreviewBadge>
+            )
+          })}
+          {purity == null && selected.length === 0 && (
+            <Text size="small" className="text-ui-fg-muted">
+              Geen badges geselecteerd | dit vak blijft leeg op de productpagina.
+            </Text>
+          )}
+        </div>
+        {purity == null && (
+          <Text size="xsmall" className="text-ui-fg-subtle mt-2">
+            Tip: de zuiverheid-badge (bv. &ge;99% ZUIVERHEID) komt automatisch
+            erbij als je het <code>purity</code> metadata-veld invult.
+          </Text>
+        )}
+      </div>
+
+      {/* Switches */}
+      <div className="px-6 py-4">
+        <div className="flex flex-col gap-y-5">
           {BADGE_OPTIONS.map((opt) => {
             const checked = selected.includes(opt.key)
             const id = `badge-${opt.key}`
@@ -105,9 +218,9 @@ const ProductBadgesWidget = ({ data }: DetailWidgetProps<AdminProduct>) => {
                   <Label htmlFor={id} className="txt-small font-medium">
                     {opt.label}
                   </Label>
-                  <span className="txt-small text-ui-fg-subtle">
-                    {opt.description}
-                  </span>
+                  <Text size="xsmall" className="text-ui-fg-subtle mt-1">
+                    {opt.when}
+                  </Text>
                 </div>
                 <Switch
                   id={id}
@@ -119,7 +232,12 @@ const ProductBadgesWidget = ({ data }: DetailWidgetProps<AdminProduct>) => {
           })}
         </div>
       </div>
-      <div className="flex items-center justify-end px-6 py-4">
+
+      {/* Save */}
+      <div className="flex items-center justify-between px-6 py-4">
+        <Text size="xsmall" className="text-ui-fg-subtle">
+          {dirty ? "Niet opgeslagen wijzigingen" : "Alles opgeslagen"}
+        </Text>
         <Button
           variant="primary"
           size="small"
