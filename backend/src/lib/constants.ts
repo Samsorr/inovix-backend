@@ -90,15 +90,15 @@ export const STRIPE_API_KEY = process.env.STRIPE_API_KEY;
 export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
 /**
- * (optional) Viva Wallet Smart Checkout configuration
+ * (optional) MultiSafepay configuration
+ *
+ * Inovix payments are routed through Tencore's MultiSafepay merchant account
+ * (apparel + research peptides MCCs disclosed at onboarding). The provider
+ * only registers when MULTISAFEPAY_API_KEY is set.
  */
-export const VIVA_CLIENT_ID = process.env.VIVA_CLIENT_ID;
-export const VIVA_CLIENT_SECRET = process.env.VIVA_CLIENT_SECRET;
-export const VIVA_MERCHANT_ID = process.env.VIVA_MERCHANT_ID;
-export const VIVA_API_KEY = process.env.VIVA_API_KEY;
-export const VIVA_SOURCE_CODE = process.env.VIVA_SOURCE_CODE;
-export const VIVA_ENVIRONMENT =
-  (process.env.VIVA_ENVIRONMENT as "production" | "demo" | undefined) ?? "production";
+export const MULTISAFEPAY_API_KEY = process.env.MULTISAFEPAY_API_KEY;
+export const MULTISAFEPAY_ENVIRONMENT =
+  (process.env.MULTISAFEPAY_ENVIRONMENT as "production" | "test" | undefined) ?? "production";
 
 /**
  * (optional) Meilisearch configuration

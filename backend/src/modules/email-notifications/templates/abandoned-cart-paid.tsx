@@ -45,7 +45,7 @@ export const AbandonedCartPaidTemplate: React.FC<AbandonedCartPaidProps> & {
           Abandoned cart, paid
         </Text>
         <Text className="text-[#666666] text-[12px] leading-[20px] mt-[4px] mb-0">
-          Customer paid via Viva but no Medusa order was created.
+          Customer paid via the payment provider but no Medusa order was created.
         </Text>
       </Section>
 
@@ -53,7 +53,7 @@ export const AbandonedCartPaidTemplate: React.FC<AbandonedCartPaidProps> & {
 
       <Section>
         <Text className="text-black text-[13px] font-semibold uppercase tracking-wide m-0 mb-[8px]">
-          Viva transaction
+          Payment transaction
         </Text>
         <Row className="mb-[4px]">
           <Column className="text-[#666666] text-[12px]" align="left" width="120">Transaction ID</Column>
@@ -104,13 +104,13 @@ export const AbandonedCartPaidTemplate: React.FC<AbandonedCartPaidProps> & {
           Actie
         </Text>
         <Text className="text-black text-[13px] leading-[20px] m-0">
-          1. Verifieer de betaling in het Viva dashboard.
+          1. Verifieer de betaling in het MultiSafepay dashboard.
         </Text>
         <Text className="text-black text-[13px] leading-[20px] m-0">
           2. Neem contact op met de klant via het bovenstaande email adres.
         </Text>
         <Text className="text-black text-[13px] leading-[20px] m-0">
-          3. Maak de order handmatig aan in Medusa admin, of refund via Viva.
+          3. Maak de order handmatig aan in Medusa admin, of refund via MultiSafepay.
         </Text>
       </Section>
     </Base>

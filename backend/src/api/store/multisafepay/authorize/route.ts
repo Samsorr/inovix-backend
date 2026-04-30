@@ -1,17 +1,17 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 
-const VIVA_PROVIDER_ID = "pp_viva-wallet_viva"
+const PROVIDER_ID = "pp_multisafepay_multisafepay"
 
 type RequestBody = {
   cart_id?: string
-  transaction_id?: string
-  order_code?: string | number
+  transaction_id?: string | number
+  order_id?: string
 }
 
 type SessionDataShape = {
-  orderCode?: string
-  checkoutUrl?: string
+  mspOrderId?: string
+  paymentUrl?: string
   transactionId?: string
   amount?: number
   currency?: string
@@ -25,11 +25,15 @@ type PaymentSessionRow = {
   currency_code: string
 }
 
+// The storefront calls this endpoint from /checkout/multisafepay-return
+// after MultiSafepay redirects the customer back. We attach the MSP
+// transaction_id (and verify the round-trip order_id) to the Medusa
+// payment session so the subsequent cart.complete() can authorize.
 export async function POST(
   req: MedusaRequest,
   res: MedusaResponse
 ): Promise<void> {
-  const { cart_id, transaction_id, order_code } = (req.body ?? {}) as RequestBody
+  const { cart_id, transaction_id, order_id } = (req.body ?? {}) as RequestBody
 
   if (!cart_id || !transaction_id) {
     res
@@ -68,22 +72,24 @@ export async function POST(
       | undefined
 
     const session = cart?.payment_collection?.payment_sessions?.find(
-      (s) => s.provider_id === VIVA_PROVIDER_ID
+      (s) => s.provider_id === PROVIDER_ID
     )
 
     if (!session) {
-      res.status(404).json({ error: "No Viva payment session for this cart" })
+      res
+        .status(404)
+        .json({ error: "No MultiSafepay payment session for this cart" })
       return
     }
 
     const existingData = (session.data ?? {}) as SessionDataShape
 
     if (
-      order_code !== undefined &&
-      existingData.orderCode !== undefined &&
-      String(existingData.orderCode) !== String(order_code)
+      order_id !== undefined &&
+      existingData.mspOrderId !== undefined &&
+      String(existingData.mspOrderId) !== String(order_id)
     ) {
-      res.status(400).json({ error: "orderCode mismatch" })
+      res.status(400).json({ error: "order_id mismatch" })
       return
     }
 
@@ -91,7 +97,7 @@ export async function POST(
       id: session.id,
       data: {
         ...existingData,
-        transactionId: transaction_id,
+        transactionId: String(transaction_id),
       } as Record<string, unknown>,
       amount: session.amount,
       currency_code: session.currency_code,
@@ -100,7 +106,7 @@ export async function POST(
     res.status(200).json({ ok: true })
   } catch (err) {
     logger.error(
-      `Viva authorize endpoint failed: ${(err as Error).message}`
+      `MultiSafepay authorize endpoint failed: ${(err as Error).message}`
     )
     res.status(500).json({ error: "Failed to update payment session" })
   }
