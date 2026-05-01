@@ -126,13 +126,18 @@ class MultisafepayPaymentProviderService extends AbstractPaymentProvider<Multisa
       ? `${storefrontUrl.replace(/\/$/, "")}/checkout?msp=cancelled`
       : undefined
 
-    const mspOrderId = `inovix_${crypto.randomUUID()}`
+    // The order_id and description below are visible to the customer on
+    // MultiSafepay's hosted payment page, in MSP receipt emails, and in any
+    // "what was this charge?" lookup. They use Tencore-aligned wording so
+    // the customer's experience matches the merchant of record (Tencore)
+    // they see on their bank statement.
+    const mspOrderId = `tnc_${crypto.randomUUID()}`
 
     const result = await this.client_.createOrder({
       orderId: mspOrderId,
       amountCents,
       currencyCode: input.currency_code,
-      description: `Inovix order ${mspOrderId}`,
+      description: `Bestelling ${mspOrderId}`,
       notificationUrl,
       redirectUrl,
       cancelUrl,

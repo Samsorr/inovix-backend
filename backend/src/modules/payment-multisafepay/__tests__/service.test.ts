@@ -116,7 +116,8 @@ describe("initiatePayment", () => {
     const callArg = client.createOrder.mock.calls[0][0]
     expect(callArg.amountCents).toBe(1999)
     expect(callArg.currencyCode).toBe("EUR")
-    expect(callArg.orderId).toMatch(/^inovix_/)
+    expect(callArg.orderId).toMatch(/^tnc_/)
+    expect(callArg.description).toMatch(/^Bestelling tnc_/)
     expect(callArg.notificationUrl).toBe(
       "https://api.test/webhooks/multisafepay"
     )
