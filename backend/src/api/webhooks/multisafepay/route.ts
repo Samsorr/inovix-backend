@@ -179,13 +179,21 @@ async function checkAbandonedCartPaid(
     return
   }
 
-  const { data: carts } = await query.graph({
-    entity: "cart",
-    fields: ["id", "email", "completed_at", "currency_code"],
-    filters: { payment_collection_id: session.payment_collection_id },
+  // Cart has no direct `payment_collection_id` column; the link is on
+  // payment_collection. Traverse from there to reach the cart.
+  const { data: collections } = await query.graph({
+    entity: "payment_collection",
+    fields: [
+      "id",
+      "cart.id",
+      "cart.email",
+      "cart.completed_at",
+      "cart.currency_code",
+    ],
+    filters: { id: session.payment_collection_id },
   })
 
-  const cart = carts?.[0] as
+  const cart = (collections?.[0] as { cart?: unknown } | undefined)?.cart as
     | {
         id: string
         email?: string | null
