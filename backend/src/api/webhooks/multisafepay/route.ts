@@ -67,8 +67,10 @@ export async function POST(
   const logger = req.scope.resolve("logger") as Logger
 
   try {
+    // Medusa's getWebhookActionAndData prepends `pp_` to `provider`, so pass
+    // the bare identifier (without the prefix that PROVIDER_ID carries).
     await paymentModule.getWebhookActionAndData({
-      provider: PROVIDER_ID,
+      provider: PROVIDER_ID.replace(/^pp_/, ""),
       payload: {
         data: (req.body ?? {}) as Record<string, unknown>,
         rawData: req.rawBody as Buffer,
