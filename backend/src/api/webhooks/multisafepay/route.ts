@@ -28,6 +28,12 @@ const FAILED_STATUSES = [
   "void",
 ] as const
 
+// MSP fires the webhook within ~2s of payment, but the customer's redirect
+// back to the storefront + cart.complete round-trip can easily take 10-30s.
+// Suppress the abandoned-cart alert during that race window | only flag
+// genuinely stuck carts that have had time to complete and didn't.
+const ABANDONED_CART_GRACE_MS = 10 * 60 * 1000
+
 function getClient(): MultisafepayClient | null {
   const apiKey = process.env.MULTISAFEPAY_API_KEY
   if (!apiKey) return null
@@ -203,6 +209,20 @@ async function checkAbandonedCartPaid(
     | undefined
 
   if (cart?.completed_at) return
+
+  // Don't fire during the normal redirect race | if the session was just
+  // created, the storefront probably hasn't called cart.complete yet.
+  const sessionCreatedAt = (session as { created_at?: string | Date | null })
+    .created_at
+  if (sessionCreatedAt) {
+    const ageMs = Date.now() - new Date(sessionCreatedAt).getTime()
+    if (ageMs >= 0 && ageMs < ABANDONED_CART_GRACE_MS) {
+      logger.info(
+        `abandoned-cart check: skipping for MSP order ${order.orderId} (session ${Math.round(ageMs / 1000)}s old, within grace)`
+      )
+      return
+    }
+  }
 
   const amount = order.amountCents
   const currency = order.currencyCode || cart?.currency_code || "EUR"
