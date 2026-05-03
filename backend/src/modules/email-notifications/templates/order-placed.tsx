@@ -126,6 +126,10 @@ export const OrderPlacedTemplate: React.FC<OrderPlacedTemplateProps> & {
         <Text className="text-[#666666] text-[11px] leading-[16px] mt-[4px] mb-0">
           Inclusief btw en verzendkosten.
         </Text>
+        <Text className="text-[#666666] text-[11px] leading-[16px] mt-[8px] mb-0">
+          Op uw bankafschrift verschijnt de afschrijving als{' '}
+          <strong className="text-black">TENCORE</strong>. Tencore B.V. verwerkt de betaling voor Inovix Peptides.
+        </Text>
       </Section>
 
       <Hr className="border border-solid border-[#eaeaea] my-[20px] mx-0 w-full" />
