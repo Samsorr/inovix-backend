@@ -21,6 +21,7 @@ interface MinioServiceConfig {
   accessKey: string
   secretKey: string
   bucket?: string
+  publicUrl?: string
 }
 
 export interface MinioFileProviderOptions {
@@ -28,6 +29,11 @@ export interface MinioFileProviderOptions {
   accessKey: string
   secretKey: string
   bucket?: string
+  // Optional override for the URL prefix used when generating public file URLs.
+  // Required when the S3 endpoint differs from the public-read host (e.g. R2,
+  // where uploads go to <account>.r2.cloudflarestorage.com but reads must use
+  // pub-<hash>.r2.dev or a bucket-bound custom domain).
+  publicUrl?: string
 }
 
 const DEFAULT_BUCKET = 'medusa-media'
@@ -88,7 +94,8 @@ class MinioFileProviderService extends AbstractFileProviderService {
       endPoint: endPoint,
       accessKey: options.accessKey,
       secretKey: options.secretKey,
-      bucket: options.bucket
+      bucket: options.bucket,
+      publicUrl: options.publicUrl?.replace(/\/$/, '')
     }
 
     // Use provided bucket or default
@@ -247,9 +254,13 @@ class MinioFileProviderService extends AbstractFileProviderService {
         }
       )
 
-      // Generate URL using the endpoint and bucket with correct protocol
-      const protocol = this.useSSL ? 'https' : 'http'
-      const url = `${protocol}://${this.config_.endPoint}/${this.bucket}/${fileKey}`
+      // Generate the public URL. If a publicUrl override is configured (e.g. R2's
+      // pub-<hash>.r2.dev domain, which serves files without the bucket in the path),
+      // use it directly; otherwise fall back to the standard MinIO pattern of
+      // <endpoint>/<bucket>/<key>.
+      const url = this.config_.publicUrl
+        ? `${this.config_.publicUrl}/${fileKey}`
+        : `${this.useSSL ? 'https' : 'http'}://${this.config_.endPoint}/${this.bucket}/${fileKey}`
 
       this.logger_.info(`Successfully uploaded file ${fileKey} to MinIO bucket ${this.bucket}`)
 
