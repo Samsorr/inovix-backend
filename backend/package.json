@@ -26,6 +26,7 @@
   "dependencies": {
     "@medusajs/admin-sdk": "2.12.1",
     "@medusajs/admin-shared": "2.12.1",
+    "@medusajs/cache-redis": "2.12.1",
     "@medusajs/cli": "2.12.1",
     "@medusajs/dashboard": "2.12.1",
     "@medusajs/draft-order": "2.12.1",
