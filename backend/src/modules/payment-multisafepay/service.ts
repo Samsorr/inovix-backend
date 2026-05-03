@@ -53,6 +53,24 @@ type SessionData = {
   currency?: string
 }
 
+// Currencies that don't follow the default 2-decimal cents model. These
+// affect the smallest-unit conversion: zero-decimal currencies are billed
+// as whole units, three-decimal currencies as thousandths.
+const ZERO_DECIMAL_CURRENCIES = new Set([
+  "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG",
+  "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
+])
+const THREE_DECIMAL_CURRENCIES = new Set([
+  "BHD", "IQD", "JOD", "KWD", "OMR", "TND",
+])
+
+function decimalsForCurrency(currencyCode: string): number {
+  const upper = currencyCode.toUpperCase()
+  if (ZERO_DECIMAL_CURRENCIES.has(upper)) return 0
+  if (THREE_DECIMAL_CURRENCIES.has(upper)) return 3
+  return 2
+}
+
 const PAID_STATUSES: MultisafepayStatus[] = ["completed"]
 const AUTHORIZED_STATUSES: MultisafepayStatus[] = ["uncleared", "reserved"]
 const FAILED_STATUSES: MultisafepayStatus[] = [
@@ -90,7 +108,7 @@ class MultisafepayPaymentProviderService extends AbstractPaymentProvider<Multisa
   async initiatePayment(
     input: InitiatePaymentInput
   ): Promise<InitiatePaymentOutput> {
-    const amountCents = this.toCents(input.amount)
+    const amountCents = this.toSmallestUnit(input.amount, input.currency_code)
 
     const customerCtx = input.context?.customer as
       | {
@@ -428,18 +446,32 @@ class MultisafepayPaymentProviderService extends AbstractPaymentProvider<Multisa
     }
   }
 
-  private toCents(amount: unknown): number {
-    if (typeof amount === "number") return Math.round(amount)
+  // Medusa hands payment providers `amount` in the major currency unit
+  // (e.g. 52 means €52.00). MSP's API expects the value in the smallest
+  // unit (cents for EUR, yen for JPY, fils-of-a-thousandth for KWD), so
+  // every provider has to perform the conversion itself. The set of
+  // zero- and three-decimal currencies follows the official MSP/Stripe
+  // currency tables (https://docs.multisafepay.com/docs/currencies,
+  // https://docs.stripe.com/currencies).
+  private toSmallestUnit(amount: unknown, currencyCode: string): number {
+    const decimal = this.amountToNumeric(amount)
+    const exponent = decimalsForCurrency(currencyCode)
+    const multiplier = Math.pow(10, exponent)
+    return Math.round(decimal * multiplier)
+  }
+
+  private amountToNumeric(amount: unknown): number {
+    if (typeof amount === "number") return amount
     if (typeof amount === "bigint") return Number(amount)
     if (amount && typeof amount === "object" && "numeric" in amount) {
       const n = (amount as { numeric: unknown }).numeric
-      if (typeof n === "number") return Math.round(n)
-      if (typeof n === "string") return Math.round(Number(n))
+      if (typeof n === "number") return n
+      if (typeof n === "string") return Number(n)
     }
-    if (typeof amount === "string") return Math.round(Number(amount))
+    if (typeof amount === "string") return Number(amount)
     throw new MedusaError(
       MedusaError.Types.INVALID_DATA,
-      `MultiSafepay: cannot convert amount to cents: ${JSON.stringify(amount)}`
+      `MultiSafepay: cannot interpret amount: ${JSON.stringify(amount)}`
     )
   }
 }

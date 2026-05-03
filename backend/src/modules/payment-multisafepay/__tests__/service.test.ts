@@ -98,7 +98,7 @@ describe("initiatePayment", () => {
 
     const result = await service.initiatePayment({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      amount: 1999 as any,
+      amount: 19.99 as any,
       currency_code: "EUR",
       context: {
         idempotency_key: "idem-1",
@@ -137,6 +137,38 @@ describe("initiatePayment", () => {
       amount: 1999,
       currency: "EUR",
     })
+  })
+
+  it("converts EUR major units to cents (regression: previously sent at 1/100th)", async () => {
+    const { service, client } = makeService()
+    client.createOrder.mockResolvedValue({
+      orderId: "id",
+      paymentUrl: "https://payv2.multisafepay.com/x",
+    })
+    await service.initiatePayment({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      amount: 52 as any,
+      currency_code: "EUR",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      context: {} as any,
+    })
+    expect(client.createOrder.mock.calls[0][0].amountCents).toBe(5200)
+  })
+
+  it("treats JPY as zero-decimal (whole units, no cents conversion)", async () => {
+    const { service, client } = makeService()
+    client.createOrder.mockResolvedValue({
+      orderId: "id",
+      paymentUrl: "https://payv2.multisafepay.com/x",
+    })
+    await service.initiatePayment({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      amount: 1500 as any,
+      currency_code: "JPY",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      context: {} as any,
+    })
+    expect(client.createOrder.mock.calls[0][0].amountCents).toBe(1500)
   })
 })
 
