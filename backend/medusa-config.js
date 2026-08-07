@@ -88,7 +88,14 @@ const medusaConfig = {
     },
     ...(REDIS_URL ? [{
       key: Modules.EVENT_BUS,
-      resolve: '@medusajs/event-bus-redis',
+      // Subpath form, same reason as locking below: @medusajs/event-bus-redis
+      // is NOT a declared dependency here, only a transitive one, so the bare
+      // specifier resolves locally by luck (a stray hoisted node_modules) and
+      // is one packaging change away from failing Railway's strict pnpm
+      // install. dist/modules/event-bus-redis.js is a plain re-export of the
+      // same package from inside medusa's own scope, so this is identical at
+      // runtime and resolves reliably.
+      resolve: '@medusajs/medusa/event-bus-redis',
       options: {
         redisUrl: REDIS_URL
       }
@@ -107,6 +114,34 @@ const medusaConfig = {
       resolve: '@medusajs/cache-redis',
       options: {
         redisUrl: REDIS_URL
+      }
+    },
+    // Distributed reservation lock. reserveInventoryStep serialises
+    // createReservationItems per inventory item through Modules.LOCKING; without
+    // this block Medusa falls back to the in-memory provider (a plain Map on a
+    // singleton), which only serialises within ONE process. available_quantity is
+    // computed in JS with no DB constraint behind it, so a second replica or a
+    // server/worker split would let two cart.complete calls for the last unit
+    // interleave and oversell. Package names are the subpaths of the declared
+    // @medusajs/medusa dependency (the bare @medusajs/locking-redis is only a
+    // transitive dep and does not resolve from the app root under strict pnpm);
+    // this mirrors MODULE_PACKAGE_NAMES / TEMPORARY_REDIS_MODULE_PACKAGE_NAMES
+    // in @medusajs/utils. Without REDIS_URL we deliberately register nothing, so
+    // local dev keeps working on the in-memory default.
+    {
+      key: Modules.LOCKING,
+      resolve: '@medusajs/medusa/locking',
+      options: {
+        providers: [
+          {
+            resolve: '@medusajs/medusa/locking-redis',
+            id: 'locking-redis',
+            is_default: true,
+            options: {
+              redisUrl: REDIS_URL
+            }
+          }
+        ]
       }
     }] : []),
     ...(SENDGRID_API_KEY && SENDGRID_FROM_EMAIL || RESEND_API_KEY && RESEND_FROM_EMAIL ? [{

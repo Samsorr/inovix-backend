@@ -11,6 +11,8 @@ import {
 
 const FIELDS = [
   "id",
+  // detectSetupIssues only flags "sells without stock control" on live products.
+  "status",
   "weight",
   "thumbnail",
   "images.id",
