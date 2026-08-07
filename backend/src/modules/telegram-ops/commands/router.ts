@@ -111,18 +111,28 @@ export async function handleUpdate(container: MedusaContainer, update: TelegramU
 
   if (!allowed.includes(chatId)) {
     logger.warn(`telegram-ops: refused update from non-allowlisted chat ${chatId}`)
-    // Polite refusal to the stranger (spec 2.2), plus ONE notification to the
-    // operator per unknown chat (notify dedups on the key) so a friend who
-    // should get access can be added to TELEGRAM_ALLOWED_CHAT_IDS.
-    await svc.sendTo(chatId, 'This is a private bot for the shop operator. Access requests go to the owner.')
+    // ONE notification to the operator per unknown chat (notify dedups on the
+    // key) so a friend who should get access can be added to
+    // TELEGRAM_ALLOWED_CHAT_IDS, and the polite refusal (spec 2.2) rides the
+    // SAME dedup: it goes out only on genuine first contact.
+    //
+    // Replying to every message would let anyone who knows the public bot
+    // username drive unbounded outbound sends (3 attempts each). Past
+    // Telegram's ~30 msg/s ceiling the bot starts getting 429s, and because
+    // notify() claims its key before sending, a real "New order" push landing
+    // in that window is dropped permanently | the operator never learns a paid
+    // order arrived. So the stranger path must cost at most one send, ever.
     const from = msg.from
     const who = [from?.first_name, from?.username ? `@${from.username}` : null].filter(Boolean).join(' ')
-    await svc.notify(
+    const firstContact = await svc.notify(
       `tg-stranger-${chatId}`,
       'stranger',
       `👋 Chat <b>${escapeHtml(chatId)}</b>${who ? ` (${escapeHtml(who)})` : ''} tried to use the bot. To grant access, add the id to TELEGRAM_ALLOWED_CHAT_IDS on Railway.`,
       {}
     )
+    if (firstContact) {
+      await svc.sendTo(chatId, 'This is a private bot for the shop operator. Access requests go to the owner.')
+    }
     return
   }
 
