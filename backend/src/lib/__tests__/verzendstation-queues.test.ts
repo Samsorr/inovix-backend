@@ -54,7 +54,7 @@ describe("buildVerzendstationQueues", () => {
     })
   })
 
-  it("excludes unpaid, refunded and canceled orders from to_process", () => {
+  it("excludes unpaid, refunded and canceled orders from to_process (they surface as needs_attention instead)", () => {
     const unpaid = row({
       id: "o2",
       payment_collections: [
@@ -109,7 +109,7 @@ describe("buildVerzendstationQueues", () => {
     expect(q.to_process[0].customer_name).toBe("jan@example.com")
   })
 
-  it("skips a mid-flight fulfillment (exists but not packed yet)", () => {
+  it("keeps a fulfillment without packed_at out of the work queues", () => {
     const midFlight = row({
       id: "o9",
       fulfillments: [{ id: "f4", packed_at: null, shipped_at: null, canceled_at: null }],
@@ -182,6 +182,241 @@ describe("buildVerzendstationQueues", () => {
     const q = buildVerzendstationQueues([canceledPlusShipped])
     expect(q.to_process).toHaveLength(0)
     expect(q.to_ship).toHaveLength(0)
+  })
+})
+
+describe("needs_attention: an order must never be invisible on every surface", () => {
+  // The exact live shape of the 2026-06-03 broker-callback HMAC break: Mollie
+  // has the money and the order exists (orders are only created after Mollie
+  // reports paid), but processPaymentWorkflow never ran, so the payment row
+  // carries the authorized amount with NO capture rows. query.graph returns
+  // bigNumber objects here and has no captured_amount field at all.
+  function paidButNoCaptureRow() {
+    return {
+      payments: [
+        {
+          provider_id: BROKER,
+          amount: { value: "89.9", precision: 20 },
+          raw_amount: { value: "89.9", precision: 20 },
+          canceled_at: null,
+          captures: [],
+          refunds: [],
+        },
+      ],
+    }
+  }
+
+  it("surfaces a paid order whose Medusa capture row is missing instead of dropping it", () => {
+    const drifted = row({ id: "o_nocapture", payment_collections: [paidButNoCaptureRow()] })
+
+    const q = buildVerzendstationQueues([drifted])
+
+    // It is not normal pick work, so it must not be mixed into to_process...
+    expect(q.to_process).toHaveLength(0)
+    expect(q.to_ship).toHaveLength(0)
+    // ...but it must be visible, named and explained.
+    expect(q.needs_attention.map((e) => e.id)).toEqual(["o_nocapture"])
+    const entry = q.needs_attention[0]
+    expect(entry.customer_name).toBe("Jan Jansen")
+    expect(entry.item_count).toBe(3)
+    expect(entry.display_id).toBe(28411)
+    expect(entry.reasons.map((r) => r.code)).toEqual(["payment_unconfirmed"])
+    expect(entry.reasons[0].label).toContain("Betaling niet bevestigd in Medusa")
+    // The gate's own reason names WHICH check failed.
+    expect(entry.reasons[0].label).toContain("nog niet (volledig) ontvangen")
+    expect(entry.reasons[0].action).not.toHaveLength(0)
+  })
+
+  it("no paid order can end up in zero buckets (the invariant, over every payment/fulfillment shape)", () => {
+    const shapes: QueueOrderRow[] = [
+      row({ id: "s_no_capture", payment_collections: [paidButNoCaptureRow()] }),
+      row({ id: "s_no_payment_at_all", payment_collections: [] }),
+      row({ id: "s_no_collection_rows", payment_collections: null }),
+      row({
+        id: "s_partial_capture",
+        payment_collections: [
+          {
+            payments: [
+              {
+                provider_id: BROKER,
+                amount: { value: "100", precision: 20 },
+                canceled_at: null,
+                captures: [{ amount: { value: "40", precision: 20 } }],
+                refunds: [],
+              },
+            ],
+          },
+        ],
+      }),
+      row({
+        id: "s_refund_after_label",
+        fulfillments: [
+          { id: "f", packed_at: "2026-07-13T10:00:00.000Z", shipped_at: null, canceled_at: null },
+        ],
+        payment_collections: [
+          {
+            payments: [
+              {
+                provider_id: BROKER,
+                amount: 100,
+                canceled_at: null,
+                captures: [{ amount: 100 }],
+                refunds: [{ amount: 10 }],
+              },
+            ],
+          },
+        ],
+      }),
+      row({
+        id: "s_native_fulfill_button",
+        fulfillments: [{ id: "f", packed_at: null, shipped_at: null, canceled_at: null }],
+      }),
+      row({ id: "s_clean_unfulfilled" }),
+      row({
+        id: "s_clean_packed",
+        fulfillments: [
+          { id: "f", packed_at: "2026-07-13T10:00:00.000Z", shipped_at: null, canceled_at: null },
+        ],
+      }),
+    ]
+
+    const q = buildVerzendstationQueues(shapes)
+    const seen = new Set([
+      ...q.to_process.map((e) => e.id),
+      ...q.to_ship.map((e) => e.id),
+      ...q.needs_attention.map((e) => e.id),
+    ])
+
+    expect([...seen].sort()).toEqual(shapes.map((r) => r.id).sort())
+  })
+
+  it("flags a native 'Fulfill items' fulfillment as needing attention, not as done", () => {
+    const nativeFulfilled = row({
+      id: "o_native",
+      fulfillments: [{ id: "f_native", packed_at: null, shipped_at: null, canceled_at: null }],
+    })
+
+    const q = buildVerzendstationQueues([nativeFulfilled])
+
+    expect(q.needs_attention.map((e) => e.id)).toEqual(["o_native"])
+    expect(q.needs_attention[0].reasons.map((r) => r.code)).toEqual(["manual_fulfillment"])
+    expect(q.needs_attention[0].reasons[0].action).toContain("Annuleer")
+    expect(q.needs_attention[0].packed_at).toBeNull()
+  })
+
+  it("reports both problems on one order", () => {
+    const both = row({
+      id: "o_both",
+      fulfillments: [{ id: "f_native", packed_at: null, shipped_at: null, canceled_at: null }],
+      payment_collections: [paidButNoCaptureRow()],
+    })
+    const q = buildVerzendstationQueues([both])
+    expect(q.needs_attention[0].reasons.map((r) => r.code)).toEqual([
+      "manual_fulfillment",
+      "payment_unconfirmed",
+    ])
+  })
+
+  it("keeps a refund-after-label order visible (it used to vanish from to_ship)", () => {
+    const refundedAfterPacking = row({
+      id: "o_refunded_packed",
+      fulfillments: [
+        { id: "f9", packed_at: "2026-07-13T10:00:00.000Z", shipped_at: null, canceled_at: null },
+      ],
+      payment_collections: [
+        {
+          payments: [
+            {
+              provider_id: BROKER,
+              amount: 100,
+              canceled_at: null,
+              captures: [{ amount: 100 }],
+              refunds: [{ amount: 100 }],
+            },
+          ],
+        },
+      ],
+    })
+
+    const q = buildVerzendstationQueues([refundedAfterPacking])
+
+    expect(q.to_ship).toHaveLength(0)
+    expect(q.needs_attention.map((e) => e.id)).toEqual(["o_refunded_packed"])
+    // The label really exists, so the row keeps its packed_at for context.
+    expect(q.needs_attention[0].packed_at).toBe("2026-07-13T10:00:00.000Z")
+    expect(q.needs_attention[0].reasons[0].label).toContain("terugbetaald")
+  })
+
+  it("leaves healthy and shipped orders alone", () => {
+    const shipped = row({
+      id: "o_shipped",
+      fulfillments: [
+        {
+          id: "f",
+          packed_at: "2026-07-13T10:00:00.000Z",
+          shipped_at: "2026-07-13T15:00:00.000Z",
+          canceled_at: null,
+        },
+      ],
+    })
+    const canceled = row({ id: "o_canceled", status: "canceled", payment_collections: [] })
+    const q = buildVerzendstationQueues([row({ id: "o_ok" }), shipped, canceled])
+    expect(q.to_process.map((e) => e.id)).toEqual(["o_ok"])
+    expect(q.needs_attention).toHaveLength(0)
+  })
+
+  it("a payment override keeps the order in the normal queue, not in attention", () => {
+    const overridden = row({
+      id: "o_override",
+      payment_collections: [],
+      metadata: {
+        fulfillment_checklist: {
+          version: 1,
+          items: {},
+          package_closed: null,
+          overrides: [
+            {
+              step: "payment",
+              reason: "handmatige bankoverschrijving",
+              at: "2026-07-14T09:00:00.000Z",
+              by_id: "u1",
+              by_name: "Anna",
+            },
+          ],
+        },
+      },
+    })
+    const q = buildVerzendstationQueues([overridden])
+    expect(q.to_process.map((e) => e.id)).toEqual(["o_override"])
+    expect(q.needs_attention).toHaveLength(0)
+  })
+
+  it("a real label next to a native fulfillment stays in to_ship (shipping is the action)", () => {
+    const mixed = row({
+      id: "o_mixed",
+      fulfillments: [
+        { id: "f_native", packed_at: null, shipped_at: null, canceled_at: null },
+        { id: "f_dhl", packed_at: "2026-07-13T10:00:00.000Z", shipped_at: null, canceled_at: null },
+      ],
+    })
+    const q = buildVerzendstationQueues([mixed])
+    expect(q.to_ship.map((e) => e.id)).toEqual(["o_mixed"])
+    expect(q.needs_attention).toHaveLength(0)
+  })
+
+  it("sorts attention rows oldest-first and tolerates malformed rows around them", () => {
+    const older = row({
+      id: "a",
+      created_at: "2026-07-14T06:00:00.000Z",
+      payment_collections: [],
+    })
+    const newer = row({
+      id: "b",
+      created_at: "2026-07-14T09:00:00.000Z",
+      payment_collections: [],
+    })
+    const q = buildVerzendstationQueues([newer, null as never, older])
+    expect(q.needs_attention.map((e) => e.id)).toEqual(["a", "b"])
   })
 })
 

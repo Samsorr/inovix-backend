@@ -5,6 +5,8 @@ import {
   emptyChecklist,
   evaluatePaymentGate,
   hasOverride,
+  hasUnpackedNativeFulfillment,
+  labelFailureFromResponse,
   parseChecklist,
   paymentViewGate,
 } from "../order-fulfillment-checklist.logic"
@@ -270,5 +272,73 @@ describe("deriveStepStates", () => {
     expect(s.payment).toBe("blocked")
     expect(s.close).toBe("done")
     expect(s.ship).toBe("locked")
+  })
+})
+
+describe("labelFailureFromResponse", () => {
+  it("keeps the cause the route computed instead of dropping it", () => {
+    // The exact body the route now sends for an expired DHL key.
+    const f = labelFailureFromResponse(500, {
+      message:
+        "De koppeling met DHL werd geweigerd (inloggegevens verlopen of ongeldig). Er is geen label gekocht. Meld dit bij de beheerder; opnieuw proberen helpt niet.",
+      code: "dhl_auth",
+      details: "DHL Parcel POST /labels failed with 401 after re-auth",
+    })
+    expect(f.message).toContain("beheerder")
+    expect(f.details).toContain("401")
+  })
+
+  it("falls back to a Dutch sentence when the body carries nothing usable", () => {
+    expect(labelFailureFromResponse(502, {}).message).toBe("Aanmaken mislukt (502)")
+    expect(labelFailureFromResponse(502, null).details).toBeNull()
+    expect(labelFailureFromResponse(500, { message: "  " }).message).toBe(
+      "Aanmaken mislukt (500)"
+    )
+  })
+
+  it("never renders the same sentence twice", () => {
+    const f = labelFailureFromResponse(500, { message: "boom", details: "boom" })
+    expect(f.details).toBeNull()
+  })
+
+  it("ignores non-string fields from an unexpected body", () => {
+    const f = labelFailureFromResponse(500, { message: { nested: true }, details: 42 })
+    expect(f.message).toBe("Aanmaken mislukt (500)")
+    expect(f.details).toBeNull()
+  })
+})
+
+describe("hasUnpackedNativeFulfillment", () => {
+  it("flags the fulfillment Medusa's own 'Fulfill items' button makes", () => {
+    expect(
+      hasUnpackedNativeFulfillment([
+        { packed_at: null, shipped_at: null, canceled_at: null },
+      ])
+    ).toBe(true)
+  })
+
+  it("does not flag a DHL label, a shipped or a canceled fulfillment", () => {
+    // Our flow always stamps packed_at when it creates the fulfillment.
+    expect(
+      hasUnpackedNativeFulfillment([
+        { packed_at: "2026-07-13T10:00:00.000Z", shipped_at: null, canceled_at: null },
+      ])
+    ).toBe(false)
+    expect(
+      hasUnpackedNativeFulfillment([
+        { packed_at: null, shipped_at: "2026-07-13T15:00:00.000Z", canceled_at: null },
+      ])
+    ).toBe(false)
+    expect(
+      hasUnpackedNativeFulfillment([
+        { packed_at: null, shipped_at: null, canceled_at: "2026-07-13T11:00:00.000Z" },
+      ])
+    ).toBe(false)
+  })
+
+  it("tolerates missing and null relation elements", () => {
+    expect(hasUnpackedNativeFulfillment(null)).toBe(false)
+    expect(hasUnpackedNativeFulfillment(undefined)).toBe(false)
+    expect(hasUnpackedNativeFulfillment([null, undefined])).toBe(false)
   })
 })

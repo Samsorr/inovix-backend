@@ -29,11 +29,27 @@ export const stationCommand: CommandHandler = async ({ container }) => {
   })
   const queues = buildVerzendstationQueues(((data ?? []) as Array<QueueOrderRow | null>).filter(Boolean) as QueueOrderRow[])
 
-  if (!queues.to_process.length && !queues.to_ship.length) {
+  // "All orders handled" may only be said when the attention bucket is empty
+  // too. Those orders are not pickable and so are in neither work queue, which
+  // is exactly how they used to disappear from every surface at once.
+  if (!queues.to_process.length && !queues.to_ship.length && !queues.needs_attention.length) {
     return '🎉 Nothing at the station. All orders handled.'
   }
   return [
     '<b>Verzendstation</b>',
+    ...(queues.needs_attention.length
+      ? [
+          '',
+          `⚠️ Needs attention (${queues.needs_attention.length})`,
+          ...queues.needs_attention.map(
+            (e) =>
+              `#${e.display_id ?? '?'} ${escapeHtml(e.customer_name || '?')} | ${escapeHtml(
+                e.reasons.map((r) => r.label).join('; ')
+              )}`
+          ),
+          'Do not ship these until resolved.',
+        ]
+      : []),
     ...(queues.to_process.length
       ? ['', `📦 To process (${queues.to_process.length})`, ...queueLines(queues.to_process)]
       : []),

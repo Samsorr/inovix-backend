@@ -71,6 +71,70 @@ describe('runSlippingOrders', () => {
     expect(kb).toContain('snz:tg-unship-ord_1:1')
   })
 
+  it('N11: a paid order with no Medusa capture row is reminded about, not skipped', async () => {
+    // The live broker-callback-failure shape: the payment row carries the
+    // authorized amount and no capture rows at all.
+    const c = makeContainer([
+      orderRow({
+        payment_collections: [
+          {
+            payments: [
+              {
+                provider_id: 'pp_via_broker_via_broker',
+                amount: { value: '89.9', precision: 20 },
+                raw_amount: { value: '89.9', precision: 20 },
+                captures: [],
+                refunds: [],
+                canceled_at: null,
+              },
+            ],
+          },
+        ],
+      }),
+    ])
+
+    await runSlippingOrders(c as never, NOW)
+
+    expect(c.svc.sendToAll).toHaveBeenCalledTimes(1)
+    const [text, extra] = c.svc.sendToAll.mock.calls[0]
+    expect(text).toContain('Needs attention')
+    expect(text).toContain('#28412')
+    expect(text).toContain('no capture row')
+    const kb = JSON.stringify(extra)
+    expect(kb).toContain('snz:tg-attn-ord_1:1')
+    expect(c.svc.touchEvent).toHaveBeenCalledWith(
+      'tg-attn-ord_1',
+      'reminder',
+      expect.objectContaining({ sent_at: expect.any(Date) })
+    )
+  })
+
+  it('N11: a native "Fulfill items" fulfillment is reminded about', async () => {
+    const c = makeContainer([
+      orderRow({ fulfillments: [{ id: 'ful_1', packed_at: null, shipped_at: null, canceled_at: null }] }),
+    ])
+    await runSlippingOrders(c as never, NOW)
+    expect(c.svc.sendToAll).toHaveBeenCalledTimes(1)
+    expect(c.svc.sendToAll.mock.calls[0][0]).toContain('manual fulfillment')
+  })
+
+  it('N11: an attention order younger than 1h is left to the reconcile job', async () => {
+    const c = makeContainer([
+      orderRow({
+        created_at: '2026-07-15T15:30:00Z',
+        payment_collections: [
+          {
+            payments: [
+              { provider_id: 'pp_via_broker_via_broker', amount: 89.9, captures: [], refunds: [], canceled_at: null },
+            ],
+          },
+        ],
+      }),
+    ])
+    await runSlippingOrders(c as never, NOW)
+    expect(c.svc.sendToAll).not.toHaveBeenCalled()
+  })
+
   it('fresh orders are not slipping', async () => {
     const c = makeContainer([orderRow({ created_at: FRESH })])
     await runSlippingOrders(c as never, NOW)

@@ -92,9 +92,36 @@ export type QueueEntry = {
   customer_note: string | null
 }
 
+export type AttentionReasonCode = "payment_unconfirmed" | "manual_fulfillment"
+
+/**
+ * Why an order landed in the "Aandacht nodig" bucket instead of a work queue,
+ * in Dutch and ready to render. `label` names the problem, `action` names the
+ * next step, so the operator never has to guess what the bucket means.
+ */
+export type AttentionReason = {
+  code: AttentionReasonCode
+  label: string
+  action: string
+}
+
+export type AttentionEntry = QueueEntry & {
+  /** Never empty: an entry only exists here because at least one check failed. */
+  reasons: AttentionReason[]
+}
+
 export type VerzendstationQueues = {
   to_process: QueueEntry[]
   to_ship: QueueEntry[]
+  /**
+   * Orders that are NOT normal pick work but must never be invisible either:
+   * a paid order whose Medusa capture row is missing, a refund landing after
+   * the label was bought, a fulfillment created with Medusa's native "Fulfill
+   * items" button. Before this bucket existed these rows were `continue`d
+   * past, which removed them from the Verzendstation page, the daily unshipped
+   * email and the hourly Telegram reminder at the same moment.
+   */
+  needs_attention: AttentionEntry[]
 }
 
 function iso(v: string | Date | null | undefined): string | null {
@@ -118,6 +145,32 @@ function toEntry(row: QueueOrderRow, packedAt: string | null): QueueEntry {
   }
 }
 
+// The payment gate's own Dutch reason is reused verbatim ("De betaling is nog
+// niet (volledig) ontvangen", "Er is (deels) terugbetaald op deze bestelling",
+// ...) so the row says which of the four gate failures happened.
+function paymentReason(gateReason: string | null): AttentionReason {
+  return {
+    code: "payment_unconfirmed",
+    label: `Betaling niet bevestigd in Medusa: ${
+      gateReason ?? "onbekende reden"
+    }`,
+    action:
+      "De klant heeft betaald (een bestelling ontstaat pas na 'betaald'), maar Medusa heeft de betaling niet vastgelegd. Controleer de betaling op de bestelpagina voordat je verzendt.",
+  }
+}
+
+// Our own DHL flow always stamps packed_at when it creates the fulfillment
+// (create-dhl-parcel-shipment/steps/call-dhl.ts). A non-canceled fulfillment
+// WITHOUT packed_at therefore comes from Medusa's native "Fulfill items"
+// button, which consumes the items' fulfilled_quantity and used to delete the
+// order from every operator surface.
+const MANUAL_FULFILLMENT_REASON: AttentionReason = {
+  code: "manual_fulfillment",
+  label: "Handmatige fulfillment zonder DHL-label",
+  action:
+    "Er is een fulfillment aangemaakt met de knop 'Fulfill items' in plaats van met de verzendchecklist. Annuleer die fulfillment op de bestelpagina en maak het label via de checklist, anders krijgt de klant geen track-and-trace.",
+}
+
 export type BuildQueuesOptions = {
   /**
    * Called with the order id (and the error) for a row this function could not
@@ -133,6 +186,7 @@ export function buildVerzendstationQueues(
 ): VerzendstationQueues {
   const to_process: QueueEntry[] = []
   const to_ship: QueueEntry[] = []
+  const needs_attention: AttentionEntry[] = []
 
   for (const row of rows ?? []) {
     // One malformed order must never take out the whole page: this function
@@ -143,36 +197,61 @@ export function buildVerzendstationQueues(
       if (row.status === "canceled" || row.status === "draft" || row.status === "archived") {
         continue
       }
-      // Prefer a non-canceled fulfillment that still needs action (not shipped);
-      // an order with a shipped fulfillment AND a fresh redo must not be hidden
-      // behind the shipped one. Live relation arrays can hold null elements
-      // (commit 9d7e9fa), so filter before touching any element.
-      const nonCanceled = (row.fulfillments ?? []).filter((f) => !!f && !f.canceled_at)
-      const active = nonCanceled.find((f) => !f!.shipped_at) ?? nonCanceled[0]
-      if (active?.shipped_at) continue
+      // Only non-canceled fulfillments count; an order with a shipped
+      // fulfillment AND a fresh redo must not be hidden behind the shipped one,
+      // so the open (= not yet shipped) ones drive everything below. Live
+      // relation arrays can hold null elements (commit 9d7e9fa), so filter
+      // before touching any element.
+      const nonCanceled = (row.fulfillments ?? []).filter(
+        (f): f is NonNullable<typeof f> => !!f && !f.canceled_at
+      )
+      const open = nonCanceled.filter((f) => !f.shipped_at)
+      // Everything that exists is shipped: done, the customer has tracking.
+      if (nonCanceled.length > 0 && open.length === 0) continue
+      // Our DHL flow always stamps packed_at at creation (call-dhl.ts), so a
+      // packed open fulfillment means a real label was bought.
+      const packed = open.find((f) => !!f.packed_at) ?? null
+      const manualOpen = open.find((f) => !f.packed_at) ?? null
 
       // Evaluated once per row: a refund after packing must pull the order out
-      // of the ship queue (spec edge case), while a logged payment override
-      // (e.g. a manual bank transfer) keeps legitimately-overridden orders
-      // visible even though the broker payment itself never went "ok".
+      // of the ship queue (spec edge case) and into needs_attention, while a
+      // logged payment override (e.g. a manual bank transfer) keeps
+      // legitimately-overridden orders in the normal queues even though the
+      // broker payment itself never went "ok".
       const payment = (row.payment_collections ?? [])
         .filter(Boolean)
         .flatMap((c) => c!.payments ?? [])
         .filter(Boolean)
         .find((p) => p!.provider_id === BROKER_PROVIDER_ID)
-      const paymentOk =
-        evaluatePaymentGate(
-          payment ? normalizeBrokerPayment(payment as never) : null
-        ).ok || hasOverride(parseChecklist(row.metadata), "payment")
+      const gate = evaluatePaymentGate(
+        payment ? normalizeBrokerPayment(payment as never) : null
+      )
+      const paymentOverridden = hasOverride(parseChecklist(row.metadata), "payment")
+      const paymentOk = gate.ok || paymentOverridden
 
-      if (active?.packed_at) {
-        if (!paymentOk) continue
-        to_ship.push(toEntry(row, iso(active.packed_at)))
+      // Anything that is not clean work goes to needs_attention, never to
+      // `continue`. An order the customer paid for must be visible somewhere.
+      const reasons: AttentionReason[] = []
+      // An open fulfillment without packed_at is a native "Fulfill items" one:
+      // real work in progress, but not work this flow can carry (no label, no
+      // tracking, no shipping mail), so the operator has to unpick it. When a
+      // real label also exists the order still belongs in the ship queue, which
+      // is where the action is, so only flag it when nothing was packed.
+      if (!packed && manualOpen) reasons.push(MANUAL_FULFILLMENT_REASON)
+      if (!paymentOk) reasons.push(paymentReason(gate.reason))
+
+      if (reasons.length > 0) {
+        needs_attention.push({
+          ...toEntry(row, packed ? iso(packed.packed_at) : null),
+          reasons,
+        })
         continue
       }
-      if (active) continue // fulfillment exists but not packed yet: mid-flight, skip
 
-      if (!paymentOk) continue
+      if (packed) {
+        to_ship.push(toEntry(row, iso(packed.packed_at)))
+        continue
+      }
       to_process.push(toEntry(row, null))
     } catch (err) {
       opts.onSkip?.(String((row as { id?: unknown } | null)?.id ?? "unknown"), err)
@@ -182,7 +261,10 @@ export function buildVerzendstationQueues(
   // Oldest first: the longest-waiting order is the most urgent.
   to_process.sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""))
   to_ship.sort((a, b) => (a.packed_at ?? "").localeCompare(b.packed_at ?? ""))
-  return { to_process, to_ship }
+  needs_attention.sort((a, b) =>
+    (a.created_at ?? "").localeCompare(b.created_at ?? "")
+  )
+  return { to_process, to_ship, needs_attention }
 }
 
 // The to_ship entries whose packed_at is older than maxAgeMs. Used by the

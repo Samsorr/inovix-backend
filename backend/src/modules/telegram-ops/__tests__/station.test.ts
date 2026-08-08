@@ -52,4 +52,28 @@ describe('stationCommand', () => {
     const out = String(await stationCommand({ container: makeContainer([]) as never, svc, chatId: '1', args: [] }))
     expect(out).toContain('Nothing')
   })
+
+  // The failure this guards against: an order with no Medusa capture row is in
+  // neither work queue, so /station used to answer "All orders handled" while a
+  // paid customer waited. Shape modelled on the live 2026-06-03 drift: a paid
+  // broker payment with an empty captures array.
+  it('surfaces an order that needs attention instead of claiming all are handled', async () => {
+    const uncaptured = { ...paidPayment, captures: [] }
+    const rows = [row({ payment_collections: [{ payments: [uncaptured] }] })]
+
+    const out = String(await stationCommand({ container: makeContainer(rows) as never, svc, chatId: '1', args: [] }))
+
+    expect(out).not.toContain('Nothing')
+    expect(out).not.toContain('All orders handled')
+    expect(out).toContain('Needs attention (1)')
+    expect(out).toContain('#28412')
+    expect(out).toContain('Jan Jansen')
+    expect(out).toContain('Do not ship these until resolved.')
+  })
+
+  it('still says all handled when only shipped orders exist', async () => {
+    const rows = [row({ fulfillments: [{ id: 'ful_1', packed_at: 'x', shipped_at: 'y', canceled_at: null }] })]
+    const out = String(await stationCommand({ container: makeContainer(rows) as never, svc, chatId: '1', args: [] }))
+    expect(out).toContain('Nothing')
+  })
 })

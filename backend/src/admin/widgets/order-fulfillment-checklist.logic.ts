@@ -188,6 +188,60 @@ export function paymentViewGate(view: PaymentView | null): PaymentGate {
   return { ok: true, reason: null }
 }
 
+/**
+ * True when the order carries a fulfillment that Medusa's native "Fulfill
+ * items" button made: open (not shipped, not canceled) and without packed_at.
+ *
+ * The DHL flow always stamps packed_at at creation
+ * (create-dhl-parcel-shipment/steps/call-dhl.ts), so this shape can only come
+ * from the native button. It consumes the items' fulfilled_quantity, produces
+ * no label and no tracking mail, and used to remove the order from every
+ * operator surface without saying anything.
+ */
+export function hasUnpackedNativeFulfillment(
+  fulfillments:
+    | Array<
+        | {
+            packed_at?: string | Date | null
+            shipped_at?: string | Date | null
+            canceled_at?: string | Date | null
+          }
+        | null
+        | undefined
+      >
+    | null
+    | undefined
+): boolean {
+  return (fulfillments ?? []).some(
+    (f) => !!f && !f.canceled_at && !f.shipped_at && !f.packed_at
+  )
+}
+
+export type LabelFailure = { message: string; details: string | null }
+
+/**
+ * What the widget shows after a failed "Maak DHL-label".
+ *
+ * The route computes the real cause (expired DHL key, rejected address, DHL
+ * outage, missing product weight, no box presets) and sends it as `message`
+ * plus a sanitised `details`. The widget used to read `message` only, and even
+ * that was the generic English "DHL label creation failed", so every failure
+ * looked identical and the operator's only option was to click again.
+ */
+export function labelFailureFromResponse(
+  status: number,
+  body: { message?: unknown; details?: unknown } | null | undefined
+): LabelFailure {
+  const message =
+    typeof body?.message === "string" && body.message.trim()
+      ? body.message.trim()
+      : `Aanmaken mislukt (${status})`
+  const details =
+    typeof body?.details === "string" && body.details.trim() ? body.details.trim() : null
+  // Never render the same sentence twice.
+  return { message, details: details === message ? null : details }
+}
+
 export type StepId = "payment" | "pick" | "label" | "close" | "ship"
 export type StepState = "done" | "active" | "locked" | "blocked"
 
