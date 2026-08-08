@@ -76,7 +76,11 @@ const FIELD_LIMITS: Record<(typeof FIELD_KEYS)[number], number> = {
 }
 
 // Hard ceiling on generated tokens per call (bounds cost + latency).
-const MAX_OUTPUT_TOKENS = 8_000
+// Must be able to hold the largest input FIELD_LIMITS actually permits. At
+// 8_000 it could not: long_description alone is allowed up to 24_000
+// characters, which is roughly 8_000 tokens of HTML before translation, and
+// German runs longer than the source. gpt-4o-mini allows 16_384 output tokens.
+const MAX_OUTPUT_TOKENS = 16_000
 
 const LANG_LABEL: Record<TargetLang, string> = {
   nl: 'Dutch (Nederlands)',
@@ -189,11 +193,25 @@ export function dutchTargetFields(source: TranslatableFields): TranslatableField
   return out
 }
 
+// Measured 2026-08-08 against the live catalogue: at 30s / 1 retry, 18 of 32
+// products failed with "Request timed out", and a re-run failed every product
+// that had real prose. It is not document size | the successes ranged from 5 KB
+// to 52 KB of long_description while the failures clustered in the middle, so
+// it is ordinary latency variance that one retry cannot absorb. The same client
+// runs on the save subscriber, so those products could not be translated from
+// admin either, and the subscriber swallows the error.
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS ?? 120_000)
+const OPENAI_MAX_RETRIES = Number(process.env.OPENAI_MAX_RETRIES ?? 3)
+
 let client: OpenAI | null = null
 function getClient(): OpenAI | null {
   if (!OPENAI_API_KEY) return null
   if (!client) {
-    client = new OpenAI({ apiKey: OPENAI_API_KEY, timeout: 30_000, maxRetries: 1 })
+    client = new OpenAI({
+      apiKey: OPENAI_API_KEY,
+      timeout: OPENAI_TIMEOUT_MS,
+      maxRetries: OPENAI_MAX_RETRIES,
+    })
   }
   return client
 }
@@ -278,12 +296,29 @@ export async function translateFields(
     ],
   })
 
+  // A truncated response is not "nothing to translate", but the old code could
+  // not tell the difference: the JSON came back cut off, the parse threw, and
+  // this returned {} as if the call had simply found no fields. The caller then
+  // wrote an empty translation over a good one. Measured 2026-08-08: DSIP and
+  // CJC 1295 DAC produced a completely empty `de` this way, every single run,
+  // while `nl` on the same input succeeded, because German needs more tokens
+  // for the same text and tipped over the output ceiling.
+  if (completion.choices[0]?.finish_reason === 'length') {
+    throw new Error(
+      `Translation to ${lang} hit the ${MAX_OUTPUT_TOKENS} output-token ceiling and was truncated. ` +
+        `Raise MAX_OUTPUT_TOKENS or lower FIELD_LIMITS.long_description.`
+    )
+  }
+
   const raw = completion.choices[0]?.message?.content ?? '{}'
   let parsed: Record<string, unknown>
   try {
     parsed = JSON.parse(raw) as Record<string, unknown>
-  } catch {
-    parsed = {}
+  } catch (e) {
+    throw new Error(
+      `Translation to ${lang} returned unparseable JSON (${(e as Error).message}). ` +
+        `Refusing to report an empty translation as success.`
+    )
   }
 
   const out: TranslatableFields = {}

@@ -70,12 +70,17 @@ export default async function backfillNlTranslations({ container }: ExecArgs) {
       continue
     }
 
-    // The gap we are closing: an `nl` translation that carries no prose.
+    // Check every rendered locale, not just nl. Checking nl alone missed two
+    // products whose German was empty, so they were reported as done.
     // `description` is the field the catalogue card and the meta description
-    // both read, so it is the honest test for "is the Dutch page English".
+    // both read, so it is the honest test for "is this page in the wrong
+    // language".
     const i18n = metadata.i18n as Record<string, Record<string, unknown>> | undefined
-    const nlDescription = i18n?.nl?.description
-    if (typeof nlDescription === 'string' && nlDescription.trim().length > 0) {
+    const complete = (['nl', 'de', 'en'] as const).every((l) => {
+      const v = i18n?.[l]?.description
+      return typeof v === 'string' && v.trim().length > 0
+    })
+    if (complete) {
       alreadyDutch++
       continue
     }
@@ -125,9 +130,28 @@ export default async function backfillNlTranslations({ container }: ExecArgs) {
   let done = 0
   for (const c of candidates) {
     try {
-      const i18n = await translateAll(c.source)
+      const fresh = await translateAll(c.source)
       const current = await productModule.retrieveProduct(c.id)
       const metadata = (current.metadata ?? {}) as Record<string, unknown>
+
+      // MERGE per locale, never replace the whole i18n object. A translation
+      // can come back empty for one language while the others are fine, and
+      // replacing wholesale then destroys a good stored translation. That is
+      // not hypothetical: it cost DSIP and CJC 1295 DAC their German on
+      // 2026-08-08 before this was in place.
+      const prev = (metadata.i18n ?? {}) as Record<string, Record<string, unknown>>
+      const i18n = Object.fromEntries(
+        (['nl', 'de', 'en'] as const).map((l) => {
+          const f = (fresh as unknown as Record<string, Record<string, unknown>>)[l] ?? {}
+          const merged: Record<string, unknown> = { ...(prev[l] ?? {}) }
+          for (const [k, v] of Object.entries(f)) {
+            if (v === null || v === undefined) continue
+            if (typeof v === 'string' && !v.trim()) continue
+            merged[k] = v
+          }
+          return [l, merged]
+        })
+      )
 
       await productModule.updateProducts(c.id, {
         metadata: {
