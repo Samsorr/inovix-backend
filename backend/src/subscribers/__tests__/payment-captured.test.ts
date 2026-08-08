@@ -43,6 +43,9 @@ describe('payment-captured subscriber', () => {
 
   const mockNotificationService = {
     createNotifications: jest.fn().mockResolvedValue(undefined),
+    // The confirmation goes through sendEmailNotification, which reads the
+    // existing rows for this idempotency key before creating anything.
+    listNotifications: jest.fn().mockResolvedValue([]),
   }
 
   const mockQuery = {

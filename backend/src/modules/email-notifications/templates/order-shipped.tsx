@@ -34,7 +34,13 @@ export interface OrderShippedTemplateProps {
 export const isOrderShippedTemplateData = (
   data: any
 ): data is OrderShippedTemplateProps =>
+  // `typeof null === 'object'`, so null must be excluded explicitly or the
+  // template throws on the first property access, inside renderAsync.
+  data != null &&
+  typeof data === 'object' &&
+  data.order != null &&
   typeof data.order === 'object' &&
+  data.shippingAddress != null &&
   typeof data.shippingAddress === 'object' &&
   Array.isArray(data.labels) &&
   Array.isArray(data.items)

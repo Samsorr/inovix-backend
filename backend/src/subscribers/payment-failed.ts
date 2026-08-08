@@ -1,7 +1,8 @@
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
-import { INotificationModuleService, Logger } from '@medusajs/framework/types'
+import { Logger } from '@medusajs/framework/types'
 import { SubscriberArgs, SubscriberConfig } from '@medusajs/medusa'
 import { EmailTemplates } from '../modules/email-notifications/templates'
+import { sendEmailNotification } from '../modules/email-notifications/send-notification'
 import { Sentry } from '../lib/instrument'
 import { normalizeEmailLocale, type EmailLocale } from '../lib/email-locale'
 import { PAYMENT_FAILED_I18N } from '../modules/email-notifications/templates/email-i18n'
@@ -40,7 +41,6 @@ export default async function paymentFailedHandler({
   event: { data },
   container,
 }: SubscriberArgs<PaymentFailedData>) {
-  const notificationModuleService: INotificationModuleService = container.resolve(Modules.NOTIFICATION)
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const logger: Logger = container.resolve('logger')
 
@@ -101,7 +101,7 @@ export default async function paymentFailedHandler({
       retryUrl
     )
 
-    await notificationModuleService.createNotifications({
+    await sendEmailNotification(container, {
       to: recipientEmail,
       channel: 'email',
       template: EmailTemplates.PAYMENT_FAILED,

@@ -1,7 +1,10 @@
+// The real `resend@4.0.1` resolves with `{ data, error }` on EVERY outcome and
+// never rejects on an API failure. The mock must model that exact shape or the
+// test proves nothing.
 jest.mock('resend', () => ({
   Resend: jest.fn().mockImplementation(() => ({
     emails: {
-      send: jest.fn().mockResolvedValue({ id: 'email_123' }),
+      send: jest.fn().mockResolvedValue({ data: { id: 'email_123' }, error: null }),
     },
   })),
 }), { virtual: true })
@@ -264,23 +267,97 @@ describe('ResendNotificationService', () => {
       await expect(service.send(notification as any)).rejects.toThrow('Invalid template data')
     })
 
-    it('throws MedusaError when Resend API fails', async () => {
+    it('throws MedusaError when the SDK itself rejects (template render failure)', async () => {
       const { Resend } = require('resend')
       const resendInstance = Resend.mock.results[0].value
-      resendInstance.emails.send.mockRejectedValueOnce({
-        code: 'rate_limit_exceeded',
-        response: { body: { errors: [{ message: 'Too many requests' }] } },
-      })
+      resendInstance.emails.send.mockRejectedValueOnce(
+        new TypeError("Cannot read properties of undefined (reading 'raw_current_order_total')")
+      )
 
       const notification = {
         to: 'user@example.com',
         channel: 'email',
-        template: 'invite-user',
+        template: 'order-placed',
         data: { emailOptions: { subject: 'Test' } },
       }
 
+      // The real TypeError message must survive; it used to be discarded and
+      // reported as "undefined - unknown error".
       await expect(service.send(notification as any)).rejects.toThrow(
-        /Failed to send "invite-user" email to user@example.com via Resend/
+        /raw_current_order_total/
+      )
+    })
+
+    // ---------------------------------------------------------------------
+    // The CRITICAL regression: resend@4.x resolves (never rejects) on 403,
+    // 422, 429 and network failures. Reporting those as success is what burned
+    // the idempotency key and silently dropped order confirmations.
+    // ---------------------------------------------------------------------
+    describe('Resend { data: null, error } responses', () => {
+      const notification = {
+        to: 'klant@example.nl',
+        channel: 'email',
+        template: 'order-placed',
+        data: { emailOptions: { subject: 'Bestelling bevestigd' } },
+      }
+
+      function mockResendError(error: { name: string; message: string }) {
+        const { Resend } = require('resend')
+        const resendInstance = Resend.mock.results[0].value
+        resendInstance.emails.send.mockResolvedValueOnce({ data: null, error })
+        return resendInstance
+      }
+
+      it.each([
+        ['not_authorized', 'This API key is restricted to only send emails'],
+        ['validation_error', 'The from address is not verified'],
+        ['rate_limit_exceeded', 'Too many requests'],
+        ['application_error', 'Unable to fetch data. The request could not be resolved.'],
+      ])('throws instead of reporting success for %s', async (name, message) => {
+        mockResendError({ name, message })
+
+        await expect(service.send(notification as any)).rejects.toThrow(
+          new RegExp(`Failed to send "order-placed" email to klant@example.nl via Resend: ${name} - `)
+        )
+      })
+
+      it('does NOT log a success line when Resend returns an error', async () => {
+        mockResendError({ name: 'not_authorized', message: 'nope' })
+
+        await expect(service.send(notification as any)).rejects.toThrow()
+
+        expect(mockLogger.log).not.toHaveBeenCalled()
+      })
+    })
+
+    it('refuses to send when the reply-to is a Tencore address', async () => {
+      const notification = {
+        to: 'klant@example.nl',
+        channel: 'email',
+        template: 'order-placed',
+        data: { emailOptions: { subject: 'Hi', replyTo: 'info@tencore.nl' } },
+      }
+
+      await expect(service.send(notification as any)).rejects.toThrow(
+        /replyTo is a Tencore address/
+      )
+
+      const { Resend } = require('resend')
+      const resendInstance = Resend.mock.results[0].value
+      expect(resendInstance.emails.send).not.toHaveBeenCalled()
+    })
+
+    it('refuses to send when the from address is a Tencore address', async () => {
+      const notification = {
+        to: 'klant@example.nl',
+        from: 'Tencore <info@tencore.nl>',
+        channel: 'email',
+        template: 'order-placed',
+        data: { emailOptions: { subject: 'Hi' } },
+      }
+
+      await expect(service.send(notification as any)).rejects.toThrow(
+        /from is a Tencore address/
       )
     })
 
@@ -299,7 +376,7 @@ describe('ResendNotificationService', () => {
       )
     })
 
-    it('returns an empty object on success', async () => {
+    it('returns the Resend message id so external_id gets populated', async () => {
       const notification = {
         to: 'user@example.com',
         channel: 'email',
@@ -309,7 +386,24 @@ describe('ResendNotificationService', () => {
 
       const result = await service.send(notification as any)
 
-      expect(result).toEqual({})
+      // Medusa writes this to notification.external_id. Returning `{}` is why
+      // external_id was NULL on all 106 production rows.
+      expect(result).toEqual({ id: 'email_123' })
+    })
+
+    it('returns an empty object when Resend answers without an id', async () => {
+      const { Resend } = require('resend')
+      const resendInstance = Resend.mock.results[0].value
+      resendInstance.emails.send.mockResolvedValueOnce({ data: null, error: null })
+
+      const notification = {
+        to: 'user@example.com',
+        channel: 'email',
+        template: 'invite-user',
+        data: { emailOptions: { subject: 'Hello' } },
+      }
+
+      expect(await service.send(notification as any)).toEqual({})
     })
   })
 })

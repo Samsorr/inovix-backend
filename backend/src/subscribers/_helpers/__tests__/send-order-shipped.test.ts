@@ -69,6 +69,9 @@ function makeContainer(
 ) {
   const notificationService = {
     createNotifications: jest.fn().mockResolvedValue(undefined),
+    // The send goes through sendEmailNotification, which checks the existing
+    // rows for this idempotency key before it creates anything.
+    listNotifications: jest.fn().mockResolvedValue([]),
     ...overrides.notificationService,
   }
   const links = overrides.links ?? [{ order_id: ORDER_ID }]
@@ -158,7 +161,7 @@ describe('sendOrderShippedNotification', () => {
       noNotification: true,
     })
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.info).toHaveBeenCalledWith(
       expect.stringContaining('no_notification flag set')
@@ -169,7 +172,7 @@ describe('sendOrderShippedNotification', () => {
     const container = makeContainer({ orders: [] })
     const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('no order found')
@@ -181,7 +184,7 @@ describe('sendOrderShippedNotification', () => {
     const container = makeContainer({ orders: [orderWithoutEmail] })
     const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('has no email')
@@ -193,7 +196,7 @@ describe('sendOrderShippedNotification', () => {
     const container = makeContainer({ orders: [orderWithoutAddress] })
     const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('has no shipping_address')
@@ -208,7 +211,7 @@ describe('sendOrderShippedNotification', () => {
     const container = makeContainer({ orders: [orderDifferentFulfillment] })
     const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('not found on order')
@@ -282,7 +285,7 @@ describe('sendOrderShippedNotification', () => {
       const container = makeContainer({ links: [] })
       const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-      expect(result).toEqual({ sent: false })
+      expect(result).toMatchObject({ sent: false })
       expect(container._query.graph).toHaveBeenCalledTimes(1)
       expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
       expect(container._logger.warn).toHaveBeenCalledWith(
@@ -300,11 +303,66 @@ describe('sendOrderShippedNotification', () => {
       const container = makeContainer({ links })
       const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-      expect(result).toEqual({ sent: false })
+      expect(result).toMatchObject({ sent: false })
       expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
       expect(container._logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('no order link found')
       )
+    })
+  })
+
+  // The operator button used to be a silent no-op: the shared static key made
+  // the notification module skip the send while the route still answered 200.
+  describe('operator resend', () => {
+    it('reports sent: false instead of lying when the customer already has the mail', async () => {
+      const container = makeContainer({
+        notificationService: {
+          createNotifications: jest.fn().mockResolvedValue(undefined),
+          listNotifications: jest.fn().mockResolvedValue([
+            {
+              id: 'noti_1',
+              idempotency_key: `order-shipped-${FULFILLMENT_ID}`,
+              status: 'success',
+              created_at: new Date().toISOString(),
+            },
+          ]),
+        },
+      })
+
+      const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
+
+      expect(result).toMatchObject({ sent: false, reason: 'already_sent' })
+      expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
+    })
+
+    it('forceResend really sends again, under a unique key', async () => {
+      const container = makeContainer({
+        notificationService: {
+          createNotifications: jest.fn().mockResolvedValue(undefined),
+          listNotifications: jest.fn().mockResolvedValue([
+            {
+              id: 'noti_1',
+              idempotency_key: `order-shipped-${FULFILLMENT_ID}`,
+              status: 'success',
+              created_at: new Date().toISOString(),
+            },
+          ]),
+        },
+      })
+
+      const result = await sendOrderShippedNotification(container, FULFILLMENT_ID, {
+        forceResend: true,
+      })
+
+      expect(result).toMatchObject({ sent: true })
+      expect(container._notificationService.createNotifications).toHaveBeenCalledTimes(1)
+
+      const call = container._notificationService.createNotifications.mock.calls[0][0]
+      expect(call.idempotency_key).toMatch(
+        new RegExp(`^order-shipped-${FULFILLMENT_ID}-resend-\\d+$`)
+      )
+      expect(call.trigger_type).toBe('admin.resend')
+      expect(call.resource_id).toBe(ORDER_ID)
     })
   })
 })

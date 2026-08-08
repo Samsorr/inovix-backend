@@ -101,4 +101,65 @@ describe("markDhlOrderShipped", () => {
       reason: "no_dhl_label",
     })
   })
+
+  // The admin "Verzendmail opnieuw sturen" button. Without an explicit resend
+  // flag the shared idempotency key makes the send a no-op, which the route
+  // used to report as a success.
+  describe("operator resend", () => {
+    const { sendOrderShippedNotification } = jest.requireMock(
+      "../../subscribers/_helpers/send-order-shipped"
+    ) as { sendOrderShippedNotification: jest.Mock }
+
+    it("does not force a resend for automatic callers", async () => {
+      const { container } = makeContainer({
+        id: "order_1",
+        items: [],
+        fulfillments: [dhlFulfillment({ shipped_at: "2026-08-01T10:00:00.000Z" })],
+      })
+
+      await markDhlOrderShipped(container, "order_1")
+
+      expect(sendOrderShippedNotification).toHaveBeenCalledWith(
+        container,
+        "f1",
+        expect.objectContaining({ forceResend: false })
+      )
+    })
+
+    it("forwards resend: true to the email helper", async () => {
+      const { container } = makeContainer({
+        id: "order_1",
+        items: [],
+        fulfillments: [dhlFulfillment({ shipped_at: "2026-08-01T10:00:00.000Z" })],
+      })
+
+      await markDhlOrderShipped(container, "order_1", { resend: true })
+
+      expect(sendOrderShippedNotification).toHaveBeenCalledWith(
+        container,
+        "f1",
+        expect.objectContaining({ forceResend: true })
+      )
+    })
+
+    it("reports the real email outcome instead of a blanket ok", async () => {
+      sendOrderShippedNotification.mockResolvedValueOnce({
+        sent: false,
+        reason: "already_sent",
+      })
+      const { container } = makeContainer({
+        id: "order_1",
+        items: [],
+        fulfillments: [dhlFulfillment({ shipped_at: "2026-08-01T10:00:00.000Z" })],
+      })
+
+      const result = await markDhlOrderShipped(container, "order_1")
+
+      expect(result).toMatchObject({
+        ok: true,
+        email_sent: false,
+        email_reason: "already_sent",
+      })
+    })
+  })
 })
