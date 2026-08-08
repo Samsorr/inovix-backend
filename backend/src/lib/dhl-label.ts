@@ -81,6 +81,18 @@ export type CreateLabelResult =
 
 export type ItemsOverride = { byId: string; byName: string; reason: string }
 
+// "DHL Parcel POST /labels failed with 400" on its own is not actionable; the
+// body carries the reason. Uses a duck-typed check rather than instanceof so a
+// DhlParcelApiError that crossed the workflow-engine serialization boundary is
+// still recognised.
+function describeError(err: unknown): string {
+  const e = err as { message?: string; body?: { key?: string; message?: string } | null }
+  const base = e?.message ?? String(err)
+  const key = e?.body?.key
+  if (!key) return base
+  return `${base} (${key}${e.body?.message ? `: ${e.body.message}` : ""})`
+}
+
 // N5 push ("Label ready") with the Mark-shipped/Details buttons. Advisory
 // only: never throws into the caller (the .catch is load-bearing on Node 22).
 function notifyLabelReady(
@@ -304,9 +316,12 @@ export async function createDhlLabelForOrder(
       return { status: "invalid", httpStatus, message: err.message, details: err.type }
     }
 
-    logger.error(
-      `admin.dhl-label: unexpected error for order ${orderId}: ${(err as Error).message}`
-    )
-    return { status: "error", message: (err as Error).message }
+    // DHL answers a rejected label with a JSON body that names the reason
+    // ({"key":"capabilities_retrieve_empty",...}). Without it the log says only
+    // "failed with 400" and the next incident needs a live reproduction to
+    // diagnose | so append it for the log AND for the operator.
+    const message = describeError(err)
+    logger.error(`admin.dhl-label: unexpected error for order ${orderId}: ${message}`)
+    return { status: "error", message }
   }
 }

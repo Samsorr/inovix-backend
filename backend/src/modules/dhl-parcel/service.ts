@@ -17,6 +17,7 @@ import {
   DHL_PARCEL_USER_ID,
 } from "lib/constants"
 import { sumOrderWeightGrams } from "./box-selector"
+import { selectDhlOptions } from "./capabilities"
 import { DhlParcelClient } from "./client"
 import { TokenCache } from "./token-cache"
 import { buildDhlConsumerTrackingUrl } from "../../lib/dhl-tracking"
@@ -34,6 +35,10 @@ import {
 // derives the same labelId).
 const DHL_LABEL_NAMESPACE = "1b671a64-40d5-491e-99b0-da01ff1f3341"
 
+// DHL's per-lane capability matrix changes on the scale of product launches,
+// not minutes, so one lookup per lane per process is plenty.
+const CAPABILITIES_TTL_MS = 6 * 60 * 60 * 1000
+
 type InjectedDependencies = { logger: Logger }
 
 // The shipping address may be partial/absent on the fulfillment order; every
@@ -45,6 +50,7 @@ class DhlParcelFulfillmentProviderService extends AbstractFulfillmentProviderSer
 
   protected client: DhlParcelClient
   protected logger_: Logger
+  private capabilities_ = new Map<string, { at: number; value: unknown }>()
 
   constructor(container: InjectedDependencies, __: Record<string, unknown>) {
     super()
@@ -182,10 +188,15 @@ class DhlParcelFulfillmentProviderService extends AbstractFulfillmentProviderSer
     //    (2026-06-06, sandbox) and is MUTUALLY EXCLUSIVE with PS: the capabilities
     //    response lists PS in HANDT's exclusions array. Therefore HANDT is added
     //    only for DOOR shipments.
-    const options: DhlParcelOption[] = [
+    //    The wanted extras are then intersected with what DHL actually offers on
+    //    THIS lane (see resolveOptions / capabilities.ts): HANDT and SSN exist
+    //    NL->NL and NL->BE but not on DHL PARCEL CONNECT / EUROPLUS, and sending
+    //    one anyway fails the whole label with 400 capabilities_retrieve_empty.
+    const delivery: DhlParcelOption =
       data.dhl_option === "PS"
         ? { key: "PS", input: data.service_point_id }
-        : { key: "DOOR" },
+        : { key: "DOOR" }
+    const wanted: DhlParcelOption[] = [
       { key: "REFERENCE", input: String(ord.display_id) },
       ...(data.dhl_option !== "PS" ? [{ key: "HANDT" } as DhlParcelOption] : []),
       // SSN = undisclosed sender: hides the sender on the label so the recipient
@@ -193,6 +204,13 @@ class DhlParcelFulfillmentProviderService extends AbstractFulfillmentProviderSer
       // NL->NL B2C. Defaults on; toggled via dhl_parcel_settings.hide_sender.
       ...(data.dhl_hide_sender ? [{ key: "SSN" } as DhlParcelOption] : []),
     ]
+    const options = await this.resolveOptions({
+      fromCountry: shipper?.address?.countryCode,
+      toCountry: receiver.address?.countryCode,
+      parcelTypeKey,
+      delivery,
+      wanted,
+    })
 
     // 10. Pieces.
     const pieces = [{ weight, dimensions }]
@@ -292,6 +310,93 @@ class DhlParcelFulfillmentProviderService extends AbstractFulfillmentProviderSer
       `[dhl-parcel] could not cancel label ${labelId} at DHL (non-fatal)` +
       (error ? ` | ${String(error)}` : ""),
     )
+  }
+
+  /**
+   * Intersect the options we want with the ones DHL offers for this lane.
+   *
+   * DHL matches a label request against its capability matrix as a whole: one
+   * option the lane does not carry makes the ENTIRE request fail with
+   * `400 {"key":"capabilities_retrieve_empty"}`. The matrix is per lane, so the
+   * NL-domestic set (HANDT + SSN) is wrong for most cross-border orders. Asking
+   * DHL beats hard-coding a country table: NL and BE do offer both, DE/DK/ES/
+   * FR/GB/IT/SE do not, and that list is DHL's to change.
+   */
+  private async resolveOptions(input: {
+    fromCountry?: string | null
+    toCountry?: string | null
+    parcelTypeKey: DhlParcelParcelType
+    delivery: DhlParcelOption
+    wanted: DhlParcelOption[]
+  }): Promise<DhlParcelOption[]> {
+    const { parcelTypeKey, delivery, wanted } = input
+    const from = (input.fromCountry || "NL").toUpperCase()
+    const to = (input.toCountry || "").toUpperCase()
+
+    // Never block a shipment on a capabilities hiccup: keep the proven domestic
+    // set at home, and abroad fall back to the delivery option + REFERENCE,
+    // which every lane in the shop's region offers.
+    const fallback = (): DhlParcelOption[] =>
+      to === from || !to
+        ? [delivery, ...wanted]
+        : [delivery, ...wanted.filter((o) => o.key === "REFERENCE")]
+
+    let capabilities: unknown
+    try {
+      capabilities = await this.getCapabilitiesCached(from, to)
+    } catch (err) {
+      this.logger_.warn(
+        `[dhl-parcel] could not read DHL capabilities for ${from}->${to}: ${(err as Error).message}; using the fallback option set`,
+      )
+      return fallback()
+    }
+
+    const selection = selectDhlOptions(
+      capabilities,
+      parcelTypeKey,
+      [delivery.key],
+      wanted.map((o) => o.key),
+    )
+
+    if (!selection) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `DHL levert pakkettype ${parcelTypeKey} met ${
+          delivery.key === "PS" ? "Servicepunt" : "Thuisbezorgd"
+        } niet op de route ${from} naar ${to}. Kies een andere doosmaat of verzendmethode.`,
+      )
+    }
+
+    if (selection.dropped.length > 0) {
+      this.logger_.info(
+        `[dhl-parcel] ${from}->${to} (${selection.productLabel ?? selection.productKey ?? "?"}) does not offer ${selection.dropped.join(", ")}; label created without ${selection.dropped.join(", ")}`,
+      )
+    }
+
+    const byKey = new Map<string, DhlParcelOption>(
+      [delivery, ...wanted].map((o) => [o.key, o]),
+    )
+    return selection.keys
+      .map((key) => byKey.get(key))
+      .filter((o): o is DhlParcelOption => Boolean(o))
+  }
+
+  private async getCapabilitiesCached(
+    fromCountry: string,
+    toCountry: string,
+  ): Promise<unknown> {
+    const key = `${fromCountry}->${toCountry}`
+    const hit = this.capabilities_.get(key)
+    if (hit && Date.now() - hit.at < CAPABILITIES_TTL_MS) {
+      return hit.value
+    }
+    const value = await this.client.getCapabilities({
+      fromCountry,
+      toCountry,
+      toBusiness: false,
+    })
+    this.capabilities_.set(key, { at: Date.now(), value })
+    return value
   }
 
   private mapReceiver(address: ShippingAddress, email?: string): DhlParcelContact {

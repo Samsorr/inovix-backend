@@ -45,7 +45,45 @@ type MockClient = {
   getLabelPdf: jest.Mock
   getAccountNumbers: jest.Mock
   tryCancelLabel: jest.Mock
+  getCapabilities: jest.Mock
 }
+
+// Capability fixtures. The default double is permissive (every option on every
+// parcel type) so the tests that are not about lanes keep testing one thing;
+// the lane-specific fixtures below mirror real GET /capabilities/business
+// responses (prod gateway, 2026-08-08).
+function capability(
+  productKey: string,
+  parcelTypeKey: string,
+  optionKeys: string[],
+): Record<string, unknown> {
+  const EXCLUSIONS: Record<string, string[]> = {
+    PS: ["DOOR", "HANDT"],
+    DOOR: ["PS"],
+    HANDT: ["PS"],
+  }
+  return {
+    product: { key: productKey, label: productKey },
+    parcelType: { key: parcelTypeKey },
+    options: optionKeys.map((key) => ({
+      key,
+      exclusions: (EXCLUSIONS[key] ?? []).map((k) => ({ key: k })),
+    })),
+  }
+}
+
+const PERMISSIVE_CAPABILITIES = ["XSMALL", "SMALL", "SMALL_MEDIUM", "MEDIUM"].map((pt) =>
+  capability("DFY-B2C", pt, ["DOOR", "PS", "REFERENCE", "HANDT", "SSN"]),
+)
+
+// NL -> DE (and DK/ES/FR/GB/IT/SE): DHL PARCEL CONNECT + EUROPLUS. Neither
+// offers HANDT or SSN, and XSMALL does not exist on the lane.
+const CROSS_BORDER_CAPABILITIES = [
+  capability("CON", "SMALL", ["DOOR", "PS", "REFERENCE"]),
+  capability("CON", "MEDIUM", ["DOOR", "PS", "REFERENCE"]),
+  capability("EPL-INT", "SMALL", ["DOOR", "REFERENCE", "LQ"]),
+  capability("EPL-INT", "MEDIUM", ["DOOR", "REFERENCE", "LQ"]),
+]
 
 function makeMockClient(overrides: Partial<MockClient> = {}): MockClient {
   return {
@@ -54,6 +92,7 @@ function makeMockClient(overrides: Partial<MockClient> = {}): MockClient {
     getLabelPdf: jest.fn(),
     getAccountNumbers: jest.fn(async () => ["ACC-0001"]),
     tryCancelLabel: jest.fn(async () => ({ cancelled: true })),
+    getCapabilities: jest.fn(async () => PERMISSIVE_CAPABILITIES),
     ...overrides,
   }
 }
@@ -462,6 +501,108 @@ describe("DhlParcelFulfillmentProviderService", () => {
     await svc.createFulfillment(BASE_DATA, SAMPLE_ITEMS, sampleOrder(), {})
     const absentInput = client.createLabel.mock.calls[0][0]
     expect(absentInput.options.some((o: { key: string }) => o.key === "SSN")).toBe(false)
+  })
+
+  // ─── Cross-border lanes: options must match DHL's per-lane capabilities ──────
+  // Order #28416 (NL -> DE, 2026-08-08) failed five times with
+  // "DHL Parcel POST /labels failed with 400" because the payload carried HANDT
+  // and SSN. DHL PARCEL CONNECT does not offer either, and DHL rejects the whole
+  // label (400 capabilities_retrieve_empty) instead of ignoring the option.
+  it("createFulfillment drops HANDT and SSN for a lane that does not offer them (NL -> DE)", async () => {
+    const client = makeMockClient({
+      getCapabilities: jest.fn(async () => CROSS_BORDER_CAPABILITIES),
+    })
+    client.createLabel.mockResolvedValue(SAMPLE_LABEL_RESPONSE)
+    const { svc } = await makeService(client)
+
+    const order = sampleOrder()
+    order.shipping_address.country_code = "de"
+    order.shipping_address.postal_code = "14827"
+    order.shipping_address.city = "Wiesenburg/Mark"
+
+    await svc.createFulfillment({ ...BASE_DATA, dhl_hide_sender: true }, SAMPLE_ITEMS, order, {})
+
+    expect(client.getCapabilities).toHaveBeenCalledWith({
+      fromCountry: "NL",
+      toCountry: "DE",
+      toBusiness: false,
+    })
+    const input = client.createLabel.mock.calls[0][0]
+    expect(input.options).toEqual([{ key: "DOOR" }, { key: "REFERENCE", input: "1042" }])
+  })
+
+  it("createFulfillment keeps HANDT and SSN on a lane that offers them (NL -> NL)", async () => {
+    const client = makeMockClient()
+    client.createLabel.mockResolvedValue(SAMPLE_LABEL_RESPONSE)
+    const { svc } = await makeService(client)
+
+    await svc.createFulfillment({ ...BASE_DATA, dhl_hide_sender: true }, SAMPLE_ITEMS, sampleOrder(), {})
+
+    const input = client.createLabel.mock.calls[0][0]
+    expect(input.options).toEqual([
+      { key: "DOOR" },
+      { key: "REFERENCE", input: "1042" },
+      { key: "HANDT" },
+      { key: "SSN" },
+    ])
+  })
+
+  it("createFulfillment refuses (with a Dutch message) when the lane cannot carry the parcel type", async () => {
+    const client = makeMockClient({
+      // XSMALL exists NL -> NL but not on the cross-border lane.
+      getCapabilities: jest.fn(async () => CROSS_BORDER_CAPABILITIES),
+    })
+    const { svc } = await makeService(client)
+
+    const order = sampleOrder()
+    order.shipping_address.country_code = "de"
+
+    await expect(
+      svc.createFulfillment({ ...BASE_DATA, dhl_parcel_type_key: "XSMALL" }, SAMPLE_ITEMS, order, {}),
+    ).rejects.toThrow(/XSMALL/)
+    expect(client.createLabel).not.toHaveBeenCalled()
+  })
+
+  it("createFulfillment caches capabilities per lane instead of asking DHL for every label", async () => {
+    const client = makeMockClient()
+    client.createLabel.mockResolvedValue(SAMPLE_LABEL_RESPONSE)
+    const { svc } = await makeService(client)
+
+    await svc.createFulfillment(BASE_DATA, SAMPLE_ITEMS, sampleOrder(), {})
+    await svc.createFulfillment(BASE_DATA, SAMPLE_ITEMS, sampleOrder(), {})
+
+    expect(client.getCapabilities).toHaveBeenCalledTimes(1)
+    expect(client.createLabel).toHaveBeenCalledTimes(2)
+  })
+
+  it("createFulfillment still ships when the capabilities lookup fails: full set at home, minimal abroad", async () => {
+    const client = makeMockClient({
+      getCapabilities: jest.fn(async () => {
+        throw new Error("DHL Parcel GET /capabilities/business failed with 503")
+      }),
+    })
+    client.createLabel.mockResolvedValue(SAMPLE_LABEL_RESPONSE)
+    const { svc, logger } = await makeService(client)
+
+    // Domestic: keep the option set that is known to work NL -> NL.
+    await svc.createFulfillment({ ...BASE_DATA, dhl_hide_sender: true }, SAMPLE_ITEMS, sampleOrder(), {})
+    expect(client.createLabel.mock.calls[0][0].options).toEqual([
+      { key: "DOOR" },
+      { key: "REFERENCE", input: "1042" },
+      { key: "HANDT" },
+      { key: "SSN" },
+    ])
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("capabilities"))
+
+    // Abroad: fall back to the subset every lane accepts rather than risk a 400.
+    client.createLabel.mockClear()
+    const order = sampleOrder()
+    order.shipping_address.country_code = "de"
+    await svc.createFulfillment({ ...BASE_DATA, dhl_hide_sender: true }, SAMPLE_ITEMS, order, {})
+    expect(client.createLabel.mock.calls[0][0].options).toEqual([
+      { key: "DOOR" },
+      { key: "REFERENCE", input: "1042" },
+    ])
   })
 
   // ─── Test 11: labelId rotates with the attempt number (redo after cancel) ────
