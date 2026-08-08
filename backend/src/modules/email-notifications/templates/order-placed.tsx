@@ -3,7 +3,12 @@ import * as React from 'react'
 import { Base } from './base'
 import { OrderDTO, OrderAddressDTO } from '@medusajs/framework/types'
 import type { EmailLocale } from '../../../lib/email-locale'
-import { formatEmailDate, formatEmailMoney, ORDER_PLACED_I18N } from './email-i18n'
+import {
+  formatEmailDate,
+  formatEmailMoney,
+  toEmailNumber,
+  ORDER_PLACED_I18N,
+} from './email-i18n'
 
 export const ORDER_PLACED = 'order-placed'
 
@@ -18,21 +23,34 @@ interface OrderPlacedPreviewProps {
 export interface OrderPlacedTemplateProps {
   order: OrderDTO & {
     display_id: string
-    summary: { raw_current_order_total: { value: number } }
+    // Optional on purpose: `summary` is a relation and production genuinely
+    // serves orders without it (payment.captured arriving before the summary
+    // row is committed, manually created admin orders). It used to be typed as
+    // required, which is why line 95 dereferenced it unguarded and threw
+    // inside renderAsync, killing the whole email.
+    summary?: { raw_current_order_total?: { value?: number | string } } | null
   }
   shippingAddress: OrderAddressDTO
   locale?: EmailLocale
   preview?: string
 }
 
+// `typeof null === 'object'`, so the old guard happily accepted
+// `{ order: null }` and let the template blow up on the first property access.
 export const isOrderPlacedTemplateData = (data: any): data is OrderPlacedTemplateProps =>
-  typeof data.order === 'object' && typeof data.shippingAddress === 'object'
+  data != null &&
+  typeof data === 'object' &&
+  data.order != null &&
+  typeof data.order === 'object' &&
+  data.shippingAddress != null &&
+  typeof data.shippingAddress === 'object'
 
 export const OrderPlacedTemplate: React.FC<OrderPlacedTemplateProps> & {
   PreviewProps: OrderPlacedPreviewProps
 } = ({ order, shippingAddress, locale = 'nl', preview }) => {
   const t = ORDER_PLACED_I18N[locale] ?? ORDER_PLACED_I18N.nl
   const currency = order.currency_code
+  const totalValue = order.summary?.raw_current_order_total?.value
 
   return (
     <Base preview={preview ?? t.preview} locale={locale}>
@@ -74,7 +92,14 @@ export const OrderPlacedTemplate: React.FC<OrderPlacedTemplateProps> & {
               align="right"
               width="90"
             >
-              {formatEmailMoney((item as any).unit_price * item.quantity, currency, locale)}
+              {/* toEmailNumber(): query.graph serves money/quantity as raw
+                  BigNumber objects on some paths, and Number() on those is NaN,
+                  which rendered "€ NaN" at the customer. */}
+              {formatEmailMoney(
+                toEmailNumber((item as any).unit_price) * toEmailNumber(item.quantity),
+                currency,
+                locale
+              )}
             </Column>
           </Row>
         ))}
@@ -82,23 +107,30 @@ export const OrderPlacedTemplate: React.FC<OrderPlacedTemplateProps> & {
 
       <Hr className="border border-solid border-[#eaeaea] my-[16px] mx-0 w-full" />
 
-      <Section>
-        <Row>
-          <Column className="text-black text-[14px] font-semibold" align="left">
-            {t.total}
-          </Column>
-          <Column
-            className="text-black text-[14px] font-semibold whitespace-nowrap"
-            align="right"
-            width="90"
-          >
-            {formatEmailMoney(order.summary.raw_current_order_total.value, currency, locale)}
-          </Column>
-        </Row>
-        <Text className="text-[#666666] text-[11px] leading-[16px] mt-[4px] mb-0">
-          {t.inclVat}
-        </Text>
-      </Section>
+      {/* Optional chaining is load-bearing: an order without a committed
+          `summary` relation used to throw here, inside renderAsync, which
+          killed the confirmation and surfaced as "undefined - unknown error".
+          When the total is genuinely unknown the row is dropped rather than
+          printing a wrong or empty amount. */}
+      {totalValue != null ? (
+        <Section>
+          <Row>
+            <Column className="text-black text-[14px] font-semibold" align="left">
+              {t.total}
+            </Column>
+            <Column
+              className="text-black text-[14px] font-semibold whitespace-nowrap"
+              align="right"
+              width="90"
+            >
+              {formatEmailMoney(totalValue, currency, locale)}
+            </Column>
+          </Row>
+          <Text className="text-[#666666] text-[11px] leading-[16px] mt-[4px] mb-0">
+            {t.inclVat}
+          </Text>
+        </Section>
+      ) : null}
 
       <Hr className="border border-solid border-[#eaeaea] my-[20px] mx-0 w-full" />
 

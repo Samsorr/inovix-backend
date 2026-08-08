@@ -6,6 +6,7 @@ import { Sentry } from "../lib/instrument"
 import { BrokerClient } from "../modules/payment-via-broker/client"
 import { TELEGRAM_OPS_MODULE } from "../modules/telegram-ops"
 import type TelegramOpsService from "../modules/telegram-ops/service"
+import { escapeHtml, eur } from "../modules/telegram-ops/format"
 import {
   BROKER_URL,
   BROKER_CLIENT_ID,
@@ -25,9 +26,169 @@ const PAID_STATUSES = new Set(["authorized", "captured"])
 // this, so older sessions are abandoned carts not worth re-polling.
 const LOOKBACK_MS = 3 * 60 * 60 * 1000
 
+// How often the "paid but no order" alert repeats while the condition holds.
+// The job ticks every 5 minutes and the condition persists until someone fixes
+// it, so an ungated send would be 36 identical messages inside the 3h window.
+// One per hour is loud enough to act on and quiet enough to keep reading.
+const PAID_NO_ORDER_REPEAT_MS = 60 * 60 * 1000
+
 type BrokerSession = {
   data?: { cart_id?: string; ref?: string } | null
   created_at?: string | Date | null
+}
+
+// ---------------------------------------------------------------------------
+// "Paid but no order": the worst failure mode in the shop. Mollie captured the
+// money, cart completion keeps throwing (almost always inventory), so the
+// customer has paid and has nothing. Detection already existed; this is the
+// delivery to the surface the operator actually watches.
+//
+// Deliberately NOT svc.notify(): notify claims its key BEFORE sending and never
+// releases it, so one send is all you ever get and a Telegram hiccup loses it
+// permanently. That is the trap this alert can least afford. Instead the
+// reminder primitives (findEvent + touchEvent, same as telegram-slipping-orders)
+// hold a last-sent timestamp, the row is touched AFTER the send, and it is
+// deleted when the condition resolves so a later recurrence starts clean.
+// ---------------------------------------------------------------------------
+
+export function paidNoOrderKey(cartId: string): string {
+  return `tg-paidnoorder-${cartId}`
+}
+
+/** True when there is no previous send, or the last one is older than the repeat window. */
+export function isPaidNoOrderAlertDue(
+  sentAt: Date | string | null | undefined,
+  now: Date,
+  repeatMs: number = PAID_NO_ORDER_REPEAT_MS
+): boolean {
+  if (!sentAt) return true
+  const t = new Date(sentAt as string).getTime()
+  if (!Number.isFinite(t)) return true
+  return now.getTime() - t >= repeatMs
+}
+
+function amountLabel(amountMinor: number | null | undefined, currencyCode: string | null | undefined): string {
+  if (typeof amountMinor !== "number" || !Number.isFinite(amountMinor)) return "unknown"
+  const code = (currencyCode ?? "EUR").toUpperCase()
+  return code === "EUR" ? eur(amountMinor / 100) : `${code} ${(amountMinor / 100).toFixed(2)}`
+}
+
+/**
+ * Bot copy is English: this is operator-facing, and customer surfaces are the
+ * Dutch ones. Matches the rest of the bot ("New order", "Label ready"). Ids are
+ * escaped even though they are system-generated: parse mode is HTML and every
+ * push in this codebase goes through the escaping helpers.
+ *
+ * Nothing in this text ever travels toward Mollie. It is built here and handed
+ * straight to the Telegram Bot API.
+ */
+export function buildPaidNoOrderAlert(input: {
+  cartId: string
+  ref: string
+  amountMinor?: number | null
+  currencyCode?: string | null
+}): string {
+  return [
+    "🚨 <b>Paid, no order</b>",
+    `Amount: ${amountLabel(input.amountMinor, input.currencyCode)}`,
+    `Cart: <code>${escapeHtml(input.cartId)}</code>`,
+    `Payment ref: <code>${escapeHtml(input.ref)}</code>`,
+    "",
+    "The payment went through but creating the order keeps failing (almost always stock). So the customer has paid and has no order.",
+    "",
+    "<b>What to do:</b> check the stock of the items in this cart in admin and correct it. This job retries every 5 minutes and gives up 3 hours after the payment. If it still fails, create the order manually or refund via Medusa admin, and tell the customer.",
+  ].join("\n")
+}
+
+export function buildPaidNoOrderResolved(input: { cartId: string; orderRef?: string | null }): string {
+  return [
+    "✅ <b>Resolved: paid without an order</b>",
+    `Cart <code>${escapeHtml(input.cartId)}</code> now has an order${
+      input.orderRef ? ` (${escapeHtml(input.orderRef)})` : ""
+    }.`,
+    "No further action needed.",
+  ].join("\n")
+}
+
+type ReminderService = Pick<TelegramOpsService, "findEvent" | "touchEvent" | "releaseAction" | "sendToAll" | "isConfigured">
+
+function resolveTelegram(container: MedusaContainer): ReminderService | null {
+  try {
+    const svc = container.resolve(TELEGRAM_OPS_MODULE) as TelegramOpsService
+    return svc?.isConfigured?.() ? svc : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Alert once, then at most once an hour while the condition holds. The Sentry
+ * record shares the same gate so the two channels tell the same story at the
+ * same cadence instead of the log filling with 36 copies per stuck cart. With
+ * no Telegram configured the gate cannot be read, so Sentry falls back to
+ * capturing every tick (the behaviour before this alert existed).
+ */
+async function alertPaidNoOrder(
+  tg: ReminderService | null,
+  input: { cartId: string; ref: string; amountMinor?: number | null; currencyCode?: string | null },
+  now: Date
+): Promise<void> {
+  const key = paidNoOrderKey(input.cartId)
+  let due = true
+  if (tg) {
+    try {
+      const row = await tg.findEvent(key)
+      due = isPaidNoOrderAlertDue(row?.sent_at, now)
+    } catch {
+      // Never let a state read swallow the most important alert in the system.
+      due = true
+    }
+  }
+  if (!due) return
+
+  // Durable record first: it must not depend on Telegram being reachable.
+  Sentry.captureMessage(
+    `[reconcile-broker-payments] cart ${input.cartId} (ref ${input.ref}) is PAID but cart completion keeps failing | money taken, no order`,
+    { level: "warning", tags: { job: "reconcile-broker-payments" } }
+  )
+  if (!tg) return
+
+  try {
+    await tg.sendToAll(buildPaidNoOrderAlert(input))
+    // Touch AFTER the send. A crash in between costs one duplicate five minutes
+    // later; touching first would cost an hour of silence.
+    await tg.touchEvent(key, "payment_stuck", {
+      sent_at: now,
+      payload: { cart_id: input.cartId, ref: input.ref, amount_minor: input.amountMinor ?? null },
+    })
+  } catch (e) {
+    // Notifications are advisory. Recovering the customer's order is not.
+    Sentry.captureException(e, { tags: { job: "reconcile-broker-payments", step: "paid-no-order-alert" } })
+  }
+}
+
+/**
+ * Resolved = the cart became an order. Say so once and delete the row, so the
+ * operator can stop chasing it and a future stuck cart alerts from scratch
+ * instead of inheriting a stale timestamp. Silent when we never alerted.
+ */
+async function resolvePaidNoOrder(
+  tg: ReminderService | null,
+  cartId: string,
+  orderRef?: string | null
+): Promise<void> {
+  if (!tg) return
+  try {
+    const key = paidNoOrderKey(cartId)
+    const row = await tg.findEvent(key)
+    if (!row) return
+    await tg.sendToAll(buildPaidNoOrderResolved({ cartId, orderRef }))
+    await tg.releaseAction(key)
+  } catch (e) {
+    // This runs outside the per-cart try/catch, so it must not be able to
+    // abort the reconcile loop that recovers paid-but-orphaned orders.
+    Sentry.captureException(e, { tags: { job: "reconcile-broker-payments", step: "paid-no-order-resolve" } })
+  }
 }
 
 /**
@@ -90,6 +251,8 @@ export default async function reconcileBrokerPayments(
 
   const paymentModule = container.resolve(Modules.PAYMENT)
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const tg = resolveTelegram(container)
+  const now = new Date()
 
   const sessions = await paymentModule.listPaymentSessions(
     { provider_id: PROVIDER_ID },
@@ -111,11 +274,18 @@ export default async function reconcileBrokerPayments(
     fields: ["id", "completed_at"],
     filters: { id: candidates.map((c) => c.cartId) },
   })
+  const cartRows = (carts ?? []) as Array<{ id: string; completed_at: string | null } | null>
   const incomplete = new Set(
-    (carts as Array<{ id: string; completed_at: string | null }>)
-      .filter((c) => !c.completed_at)
-      .map((c) => c.id)
+    cartRows.filter((c) => c && !c.completed_at).map((c) => c!.id)
   )
+  // Only a cart we can SEE and that carries completed_at counts as resolved. A
+  // cart id the graph no longer returns is not proof of an order, so its alert
+  // row is left alone rather than falsely marked handled.
+  const completedIds = cartRows.filter((c) => c?.completed_at).map((c) => c!.id)
+  for (const cartId of completedIds) {
+    await resolvePaidNoOrder(tg, cartId)
+  }
+
   const open = candidates.filter((c) => incomplete.has(c.cartId))
   if (open.length === 0) {
     return
@@ -135,9 +305,13 @@ export default async function reconcileBrokerPayments(
   for (const { cartId, ref } of open) {
     // Poll the broker (NOT Mollie) for the live status before doing anything.
     let paid = false
+    let amountMinor: number | null = null
+    let currencyCode: string | null = null
     try {
       const payment = await broker.getPayment(ref)
       paid = PAID_STATUSES.has(payment.status)
+      amountMinor = payment.amountMinor ?? null
+      currencyCode = payment.currencyCode ?? null
     } catch (err) {
       logger.warn(
         `[reconcile-broker-payments] status poll failed for ${ref} (cart ${cartId}): ${(err as Error).message}`
@@ -155,7 +329,8 @@ export default async function reconcileBrokerPayments(
         input: { id: cartId },
         throwOnError: false,
       })
-      const orderId = (result as { id?: string } | undefined)?.id
+      const order = result as { id?: string; display_id?: number | string } | undefined
+      const orderId = order?.id
       if (!errors?.length && orderId) {
         reconciled++
         logger.info(
@@ -164,8 +339,8 @@ export default async function reconcileBrokerPayments(
 
         // Telegram ops notification (N11): advisory only, never fails the job.
         try {
-          const tg = container.resolve(TELEGRAM_OPS_MODULE) as TelegramOpsService
-          void tg.notify(
+          const notifier = container.resolve(TELEGRAM_OPS_MODULE) as TelegramOpsService
+          void notifier.notify(
             `tg-rescued-${cartId}`,
             "payment_rescued",
             `🛟 <b>Rescued payment</b>\nCustomer paid but never returned to the site. Order created from cart ${cartId}.`
@@ -173,6 +348,14 @@ export default async function reconcileBrokerPayments(
         } catch {
           /* advisory only */
         }
+
+        // If we had been shouting about this cart, close the loop: the cart
+        // that had no order now has one.
+        await resolvePaidNoOrder(
+          tg,
+          cartId,
+          order?.display_id != null ? `#${order.display_id}` : orderId
+        )
       } else {
         logger.warn(
           `[reconcile-broker-payments] cart ${cartId} is paid but did not complete (likely inventory/validation); will retry next tick`
@@ -180,10 +363,7 @@ export default async function reconcileBrokerPayments(
         // Money has been taken but no order exists and completion is failing.
         // The 3h lookback means this warn loop goes silent on its own, so the
         // operator must hear about it while it is still actionable.
-        Sentry.captureMessage(
-          `[reconcile-broker-payments] cart ${cartId} (ref ${ref}) is PAID but cart completion keeps failing | money taken, no order`,
-          { level: "warning", tags: { job: "reconcile-broker-payments" } }
-        )
+        await alertPaidNoOrder(tg, { cartId, ref, amountMinor, currencyCode }, now)
       }
     } catch (err) {
       logger.warn(

@@ -182,6 +182,28 @@ export async function createDhlLabelForOrder(
   //     "override + create" tap) is applied as a REAL checklist override
   //     first: same audit trail as the admin widget's override.
   let checklist = parseChecklist((raw as any).metadata)
+
+  // 1d-0. A redo (labelAttempt > 1) means the previous label was canceled and
+  //       the box was opened again, so a package_closed tick from that attempt
+  //       is stale: step 4 would show green ("bevestigd door X") for a package
+  //       that no longer exists. Clear it so the operator has to re-confirm the
+  //       NEW label is printed, stuck on and the box closed. Item ticks survive
+  //       a redo on purpose (the goods were really picked).
+  if (labelAttempt > 1 && checklist.package_closed) {
+    const cleared = await applyChecklistUpdate(
+      container,
+      orderId,
+      { action: "package_closed", checked: false },
+      { by_id: "system", by_name: "Systeem (label opnieuw aangemaakt)" }
+    )
+    if (!("error" in cleared)) {
+      checklist = cleared.next
+      logger.info(
+        `admin.dhl-label: cleared stale package_closed for order ${orderId} (label attempt ${labelAttempt})`
+      )
+    }
+  }
+
   const itemIds = ((raw.items ?? []) as any[]).map((i: any) => String(i.id))
   if (!allItemsTicked(itemIds, checklist) && !hasOverride(checklist, "items")) {
     if (opts.itemsOverride) {

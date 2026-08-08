@@ -7,6 +7,7 @@ import {
   type QueueEntry,
   type QueueOrderRow,
 } from "../lib/verzendstation-queues"
+import { line } from "../modules/telegram-ops/format"
 import { TELEGRAM_OPS_MODULE } from "../modules/telegram-ops"
 import type TelegramOpsService from "../modules/telegram-ops/service"
 import { headline } from "../modules/telegram-ops/format"
@@ -14,6 +15,13 @@ import { Sentry } from "../lib/instrument"
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const SCAN_TAKE = 100
+
+// Bot copy stays English, so the queue's Dutch operator labels are mapped
+// rather than pasted.
+const ATTENTION_TEXT_EN: Record<string, string> = {
+  payment_unconfirmed: "paid, but Medusa has no capture row",
+  manual_fulfillment: "manual fulfillment without a DHL label",
+}
 
 function hoursAgo(iso: string | null, now: Date): number {
   if (!iso) return 0
@@ -61,6 +69,39 @@ export async function runSlippingOrders(container: MedusaContainer, now: Date): 
       ]] },
     })
     await svc.touchEvent(key, "reminder", { sent_at: now, payload: { order_id: entry.id, display_id: entry.display_id } })
+  }
+
+  // N11: orders the queue could not clear at all (no Medusa capture row, a
+  // refund after the label, a native "Fulfill items" fulfillment). These are
+  // NOT in to_process or to_ship, so without this loop the bot goes blind on
+  // exactly the rows the Verzendstation page now flags. One hour of grace so
+  // reconcile-broker-payments (every 5 min) can close a real callback window
+  // first; after that it repeats daily like the other reminders.
+  for (const e of queues.needs_attention) {
+    if (hoursAgo(e.created_at, now) < 1) continue
+    const key = `tg-attn-${e.id}`
+    if (!(await shouldRemind(svc, key, now))) continue
+    const problems = e.reasons.map((r) => ATTENTION_TEXT_EN[r.code] ?? r.code).join(", ")
+    await svc.sendToAll(
+      [
+        headline("⚠️", `Needs attention: #${e.display_id}`),
+        line("Problem", problems),
+        line("Customer", e.customer_name || "?"),
+        "Not in the work queues. Do not ship until this is resolved.",
+      ].join("\n"),
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "🔎 Details", callback_data: `det:${e.display_id}` },
+            { text: "😴 Snooze 1d", callback_data: `snz:${key}:1` },
+          ]],
+        },
+      }
+    )
+    await svc.touchEvent(key, "reminder", {
+      sent_at: now,
+      payload: { order_id: e.id, display_id: e.display_id, reasons: e.reasons.map((r) => r.code) },
+    })
   }
 
   for (const e of queues.to_process) {

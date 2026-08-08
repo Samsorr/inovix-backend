@@ -71,6 +71,9 @@ describe("fetchBrokerLive", () => {
         status: "captured",
         brokerPaymentId: "tr_123",
         capturedAt: "2026-06-01T10:00:00.000Z",
+        method: "ideal",
+        paidAt: "2026-06-01T09:59:12.000Z",
+        providerStatus: "paid",
       }),
     }
     const live = await fetchBrokerLive("pay_abc", { client })
@@ -79,6 +82,30 @@ describe("fetchBrokerLive", () => {
       status: "captured",
       mollie_payment_id: "tr_123",
       captured_at: "2026-06-01T10:00:00.000Z",
+      method: "ideal",
+      paid_at: "2026-06-01T09:59:12.000Z",
+      mollie_status: "paid",
+    })
+  })
+
+  // An older broker build answers without the enrichment fields; the admin
+  // widget degrades on nulls, so they must never come back undefined.
+  it("degrades the enrichment fields to null when the broker omits them", async () => {
+    const client = {
+      getPayment: jest.fn().mockResolvedValue({
+        status: "authorized",
+        brokerPaymentId: null,
+        capturedAt: null,
+      }),
+    }
+    const live = await fetchBrokerLive("pay_abc", { client })
+    expect(live).toEqual({
+      status: "authorized",
+      mollie_payment_id: null,
+      captured_at: null,
+      method: null,
+      paid_at: null,
+      mollie_status: null,
     })
   })
 

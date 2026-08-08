@@ -34,6 +34,10 @@ export type MarkDhlShippedResult = {
   fulfillment_id?: string
   already_shipped?: boolean
   reason?: "order_not_found" | "no_dhl_label"
+  /** Whether the tracking email actually went out on this call. */
+  email_sent?: boolean
+  /** Why it did not, when it did not. */
+  email_reason?: string
 }
 
 type LoggerLike = {
@@ -42,17 +46,19 @@ type LoggerLike = {
 }
 
 // Find the active DHL fulfillment with a tracking number on a loaded order.
+// Live query.graph relation arrays can contain null elements (commit 9d7e9fa),
+// on both fulfillments and labels, so every element is filtered before use.
 export function findShippableDhlFulfillment(order: {
-  fulfillments?: Array<Record<string, any>> | null
+  fulfillments?: Array<Record<string, any> | null> | null
 }): Record<string, any> | null {
-  const fulfillments = (order.fulfillments ?? []) as any[]
+  const fulfillments = ((order.fulfillments ?? []) as any[]).filter(Boolean)
   return (
     fulfillments.find((f: any) => {
       if (f.canceled_at) return false
       const trackingFromData = typeof f.data?.dhl_tracking_number === "string"
-      const trackingFromLabel = (f.labels ?? []).some(
-        (l: any) => l.tracking_number != null && l.tracking_number !== ""
-      )
+      const trackingFromLabel = ((f.labels ?? []) as any[])
+        .filter(Boolean)
+        .some((l: any) => l.tracking_number != null && l.tracking_number !== "")
       const isDhl = f.provider_id === "dhl-parcel_dhl-parcel" || trackingFromData
       return isDhl && (trackingFromData || trackingFromLabel)
     }) ?? null
@@ -60,11 +66,18 @@ export function findShippableDhlFulfillment(order: {
 }
 
 // Idempotent: sets shipped_at + registers the shipment (once) and sends the
-// tracking email (deduped in the helper). Safe to call again on an
-// already-shipped order (that is the "resend email" path).
+// tracking email (deduped in the helper).
+//
+// Calling it again on an already-shipped order does NOT resend the email by
+// itself | the shared idempotency key makes the notification module skip it.
+// The operator's "Verzendmail opnieuw sturen" button must pass
+// `{ resend: true }`, which switches the helper to a unique key and produces a
+// real second send. Automatic callers (the auto-mark-shipped cron) must NOT
+// pass it, or every 30-minute tick would mail the customer again.
 export async function markDhlOrderShipped(
   container: MedusaContainer,
-  orderId: string
+  orderId: string,
+  opts?: { resend?: boolean }
 ): Promise<MarkDhlShippedResult> {
   const logger = container.resolve("logger") as LoggerLike
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
@@ -92,6 +105,7 @@ export async function markDhlOrderShipped(
         shipped_at: new Date(),
       })
       const shipItems = ((order.items ?? []) as any[])
+        .filter(Boolean)
         .map((i: any) => ({
           id: i.id,
           // Raw query.graph serves these as BigNumber objects; Number() would
@@ -114,8 +128,12 @@ export async function markDhlOrderShipped(
 
   // Idempotency-keyed: never double-sends, whichever path fires first. The
   // order id is passed so the helper never has to resolve the cross-module
-  // link itself.
-  await sendOrderShippedNotification(container, dhlFulfillment.id, { orderId })
+  // link itself. `forceResend` is the deliberate operator override.
+  const emailResult = await sendOrderShippedNotification(
+    container,
+    dhlFulfillment.id,
+    { orderId, forceResend: opts?.resend === true }
+  )
 
   // Close the order lifecycle once everything is done (captured + shipped);
   // Medusa never advances order.status past "pending" on its own. Guarded
@@ -123,5 +141,11 @@ export async function markDhlOrderShipped(
   // (resend-email) path so pre-feature orders get closed too.
   await autoCompleteOrderIfDone(container, orderId, "mark-dhl-shipped")
 
-  return { ok: true, fulfillment_id: dhlFulfillment.id, already_shipped: alreadyShipped }
+  return {
+    ok: true,
+    fulfillment_id: dhlFulfillment.id,
+    already_shipped: alreadyShipped,
+    email_sent: emailResult?.sent === true,
+    ...(emailResult?.reason ? { email_reason: emailResult.reason } : {}),
+  }
 }

@@ -166,6 +166,43 @@ describe("build-payload step (DHL Parcel)", () => {
     expect(result.output.service_point_id).toBe("sp-999")
   })
 
+  // ─── Live query.graph quantity shapes ─────────────────────────────────────
+
+  it("resolves quantities that only exist on items.detail", async () => {
+    // Same live shape as the picklist (commit bf77956): raw it.quantity
+    // arithmetic would make the weight NaN, which the provider reports as the
+    // misleading "an order item is missing a product weight", and totalUnits
+    // "0[object Object]", which silently picks the largest parcel type.
+    const order = orderWith({ dhl_option: "DOOR" }, [
+      { quantity: undefined, detail: { quantity: 2 }, product: { id: "p1", weight: 150 } },
+      { quantity: undefined, detail: { raw_quantity: { value: "3", precision: 20 } }, product: { id: "p2", weight: 10 } },
+    ])
+    const result = await buildPayload({ order } as any, { container: makeContainer() } as any)
+
+    expect(result.output.dhl_total_weight_grams).toBe(330)
+    expect(result.output.total_units).toBe(5)
+    expect(result.output.dhl_parcel_type_key).toBe("MEDIUM")
+  })
+
+  it("carries the resolved quantity on the enriched items", async () => {
+    // The provider recomputes weight from these items, so they must carry a
+    // real number, not the raw bigNumber object.
+    const order = orderWith({ dhl_option: "DOOR" }, [
+      { quantity: { value: "2", precision: 20 }, product: { id: "p1", weight: 150 } },
+    ])
+    const result = await buildPayload({ order } as any, { container: makeContainer() } as any)
+    expect(result.output.items[0].quantity).toBe(2)
+  })
+
+  it("fails with an explicit message when a quantity cannot be resolved", async () => {
+    const order = orderWith({ dhl_option: "DOOR" }, [
+      { id: "item_1", quantity: undefined, detail: null, product: { id: "p1", title: "BPC-157", weight: 150 } },
+    ])
+    await expect(
+      buildPayload({ order } as any, { container: makeContainer() } as any)
+    ).rejects.toThrow(/aantal/i)
+  })
+
   // ─── Settings / shipper tests ─────────────────────────────────────────────
 
   it("sets dhl_shipper from the settings row when one exists", async () => {

@@ -1,6 +1,8 @@
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
+import { MedusaError } from "@medusajs/framework/utils"
 import { sumOrderWeightGrams, suggestBoxPreset } from "../../../modules/dhl-parcel/box-selector"
 import { findDhlParcelMethod } from "./validate-order"
+import { itemQuantity } from "../../../lib/item-quantity"
 import type { DhlParcelContact } from "../../../modules/dhl-parcel/types"
 
 // Same literal as in validate-order: the dhl-parcel-boxes module registration
@@ -8,7 +10,7 @@ import type { DhlParcelContact } from "../../../modules/dhl-parcel/types"
 // workflow's import graph.
 const DHL_PARCEL_BOXES_MODULE = "dhl_parcel_boxes"
 
-// String literal for the settings module — same pattern as above; avoids
+// String literal for the settings module | same pattern as above; avoids
 // pulling the MikroORM model into the workflow's import graph.
 const DHL_PARCEL_SETTINGS_MODULE = "dhl_parcel_settings"
 
@@ -31,7 +33,16 @@ export type BuildPayloadInput = {
       data?: Record<string, any> | null
       shipping_option?: { data?: Record<string, any> | null } | null
     }>
-    items: Array<{ quantity: number; product?: { weight?: number | null } & Record<string, any> }>
+    // quantity is `unknown` on purpose: the order comes from a direct
+    // query.graph, which serves it as a number, as a raw { value, precision }
+    // bigNumber, or as undefined with the real value on `detail`.
+    items: Array<{
+      id?: string
+      quantity?: unknown
+      raw_quantity?: unknown
+      detail?: { quantity?: unknown; raw_quantity?: unknown } | null
+      product?: { weight?: number | null } & Record<string, any>
+    }>
   }
 }
 
@@ -53,13 +64,29 @@ const buildPayload = createStep(
   "build-dhl-parcel-payload",
   async (input: BuildPayloadInput, { container }: any) => {
     const { order } = input
-    const items = order.items ?? []
+    const items = (order.items ?? []).filter(Boolean)
+
+    // Resolve every quantity ONCE, at the boundary: raw arithmetic on the
+    // query.graph shapes yields NaN weight (which the provider then reports as
+    // the misleading "an order item is missing a product weight") and a string
+    // totalUnits (which silently selects the largest parcel type, so wrong box
+    // and wrong price). Fail explicitly instead.
+    const quantified = items.map((it) => {
+      const quantity = itemQuantity(it)
+      if (quantity == null) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `Kan het aantal van orderregel "${it.product?.title ?? it.id ?? "?"}" niet bepalen; geen DHL-label mogelijk.`,
+        )
+      }
+      return { ...it, quantity }
+    })
 
     // Total weight in grams + total units (sum of quantities).
     const dhlTotalWeightGrams = sumOrderWeightGrams(
-      items.map((it) => ({ quantity: it.quantity, product: it.product })),
+      quantified.map((it) => ({ quantity: it.quantity, product: it.product })),
     )
-    const totalUnits = items.reduce((sum, it) => sum + it.quantity, 0)
+    const totalUnits = quantified.reduce((sum, it) => sum + it.quantity, 0)
 
     // Pick the best-fit box preset for the unit count.
     const boxesService = container.resolve(DHL_PARCEL_BOXES_MODULE)
@@ -95,7 +122,7 @@ const buildPayload = createStep(
         }
       }
     } catch {
-      // Module not registered in this context (e.g. isolated test) — fall back
+      // Module not registered in this context (e.g. isolated test) | fall back
       // to the env shipper in the service.
     }
 
@@ -108,7 +135,9 @@ const buildPayload = createStep(
       dhlOption === "PS" ? (methodData.service_point_id as string | undefined) : undefined
 
     // Enrich items so the provider can recompute weight from product.weight.
-    const enrichedItems = items.map((it) => ({
+    // They carry the RESOLVED numeric quantity, so the provider's fallback
+    // recompute cannot hit the raw bigNumber shape either.
+    const enrichedItems = quantified.map((it) => ({
       ...it,
       product: { ...(it.product ?? {}), weight: it.product?.weight },
     }))

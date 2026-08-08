@@ -55,16 +55,33 @@ const mockOrder = {
   fulfillments: [mockFulfillment],
 }
 
-function makeContainer(overrides: Record<string, any> = {}) {
+// The helper does a two-step lookup: `order_fulfillment` link entity first
+// (filtering orders on `fulfillments.id` generates broken SQL on Medusa 2.12),
+// then the order by its own id. The mock answers per entity so each call
+// returns its own realistic shape, like tg-shipment-created.test.ts does.
+function makeContainer(
+  overrides: {
+    notificationService?: Record<string, any>
+    logger?: Record<string, any>
+    links?: unknown[]
+    orders?: unknown[]
+  } = {}
+) {
   const notificationService = {
     createNotifications: jest.fn().mockResolvedValue(undefined),
+    // The send goes through sendEmailNotification, which checks the existing
+    // rows for this idempotency key before it creates anything.
+    listNotifications: jest.fn().mockResolvedValue([]),
     ...overrides.notificationService,
   }
+  const links = overrides.links ?? [{ order_id: ORDER_ID }]
+  const orders = overrides.orders ?? [mockOrder]
   const query = {
-    graph: jest
-      .fn()
-      .mockResolvedValue({ data: [mockOrder] }),
-    ...overrides.query,
+    graph: jest.fn().mockImplementation(({ entity }: { entity: string }) => {
+      if (entity === 'order_fulfillment') return Promise.resolve({ data: links })
+      if (entity === 'order') return Promise.resolve({ data: orders })
+      return Promise.resolve({ data: [] })
+    }),
   }
   const logger = {
     info: jest.fn(),
@@ -144,7 +161,7 @@ describe('sendOrderShippedNotification', () => {
       noNotification: true,
     })
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.info).toHaveBeenCalledWith(
       expect.stringContaining('no_notification flag set')
@@ -152,12 +169,10 @@ describe('sendOrderShippedNotification', () => {
   })
 
   it('returns { sent: false } when no order is found for the fulfillment', async () => {
-    const container = makeContainer({
-      query: { graph: jest.fn().mockResolvedValue({ data: [] }) },
-    })
+    const container = makeContainer({ orders: [] })
     const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('no order found')
@@ -166,14 +181,10 @@ describe('sendOrderShippedNotification', () => {
 
   it('returns { sent: false } when the order has no email', async () => {
     const orderWithoutEmail = { ...mockOrder, email: undefined }
-    const container = makeContainer({
-      query: {
-        graph: jest.fn().mockResolvedValue({ data: [orderWithoutEmail] }),
-      },
-    })
+    const container = makeContainer({ orders: [orderWithoutEmail] })
     const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('has no email')
@@ -182,14 +193,10 @@ describe('sendOrderShippedNotification', () => {
 
   it('returns { sent: false } when the order has no shipping_address', async () => {
     const orderWithoutAddress = { ...mockOrder, shipping_address: null }
-    const container = makeContainer({
-      query: {
-        graph: jest.fn().mockResolvedValue({ data: [orderWithoutAddress] }),
-      },
-    })
+    const container = makeContainer({ orders: [orderWithoutAddress] })
     const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('has no shipping_address')
@@ -201,16 +208,10 @@ describe('sendOrderShippedNotification', () => {
       ...mockOrder,
       fulfillments: [{ ...mockFulfillment, id: 'ful_other' }],
     }
-    const container = makeContainer({
-      query: {
-        graph: jest
-          .fn()
-          .mockResolvedValue({ data: [orderDifferentFulfillment] }),
-      },
-    })
+    const container = makeContainer({ orders: [orderDifferentFulfillment] })
     const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
 
-    expect(result).toEqual({ sent: false })
+    expect(result).toMatchObject({ sent: false })
     expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
     expect(container._logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('not found on order')
@@ -235,5 +236,133 @@ describe('sendOrderShippedNotification', () => {
     expect(call.data.emailOptions.subject).toBe(
       'Uw bestelling is onderweg | Inovix INV-001'
     )
+  })
+
+  // The shipment.created subscriber (src/subscribers/order-shipped.ts) passes
+  // no orderId, so every non-DHL-flow shipped email depends on this branch.
+  describe('order id resolution', () => {
+    it('resolves the order via the order_fulfillment link, never via a cross-module fulfillments filter', async () => {
+      const container = makeContainer()
+      const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
+
+      expect(result).toEqual({ sent: true })
+      expect(container._query.graph).toHaveBeenCalledTimes(2)
+      // First call: link entity keyed by fulfillment_id. Filtering orders on
+      // fulfillments.id generated broken SQL on Medusa 2.12 ("missing
+      // FROM-clause entry for table fulfillments", Sentry INOVIX-BACKEND-B)
+      // and silently killed every shipped email.
+      expect(container._query.graph).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          entity: 'order_fulfillment',
+          filters: { fulfillment_id: FULFILLMENT_ID },
+        })
+      )
+      // Second call: order by its own id only.
+      expect(container._query.graph).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ entity: 'order', filters: { id: ORDER_ID } })
+      )
+      for (const call of container._query.graph.mock.calls) {
+        expect(JSON.stringify(call[0].filters)).not.toContain('fulfillments')
+      }
+    })
+
+    it('skips the link lookup when the caller passes orderId', async () => {
+      const container = makeContainer()
+      const result = await sendOrderShippedNotification(container, FULFILLMENT_ID, {
+        orderId: ORDER_ID,
+      })
+
+      expect(result).toEqual({ sent: true })
+      expect(container._query.graph).toHaveBeenCalledTimes(1)
+      expect(container._query.graph).toHaveBeenCalledWith(
+        expect.objectContaining({ entity: 'order', filters: { id: ORDER_ID } })
+      )
+    })
+
+    it('returns { sent: false } when the fulfillment has no order link', async () => {
+      const container = makeContainer({ links: [] })
+      const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
+
+      expect(result).toMatchObject({ sent: false })
+      expect(container._query.graph).toHaveBeenCalledTimes(1)
+      expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
+      expect(container._logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('no order link found')
+      )
+    })
+
+    // Live query.graph hands back null relation elements and rows missing the
+    // requested field; neither may throw on the way to the customer email.
+    it.each([
+      ['a null relation element', [null]],
+      ['a row without order_id', [{}]],
+      ['a row with a null order_id', [{ order_id: null }]],
+    ])('returns { sent: false } when the link lookup yields %s', async (_label, links) => {
+      const container = makeContainer({ links })
+      const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
+
+      expect(result).toMatchObject({ sent: false })
+      expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
+      expect(container._logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('no order link found')
+      )
+    })
+  })
+
+  // The operator button used to be a silent no-op: the shared static key made
+  // the notification module skip the send while the route still answered 200.
+  describe('operator resend', () => {
+    it('reports sent: false instead of lying when the customer already has the mail', async () => {
+      const container = makeContainer({
+        notificationService: {
+          createNotifications: jest.fn().mockResolvedValue(undefined),
+          listNotifications: jest.fn().mockResolvedValue([
+            {
+              id: 'noti_1',
+              idempotency_key: `order-shipped-${FULFILLMENT_ID}`,
+              status: 'success',
+              created_at: new Date().toISOString(),
+            },
+          ]),
+        },
+      })
+
+      const result = await sendOrderShippedNotification(container, FULFILLMENT_ID)
+
+      expect(result).toMatchObject({ sent: false, reason: 'already_sent' })
+      expect(container._notificationService.createNotifications).not.toHaveBeenCalled()
+    })
+
+    it('forceResend really sends again, under a unique key', async () => {
+      const container = makeContainer({
+        notificationService: {
+          createNotifications: jest.fn().mockResolvedValue(undefined),
+          listNotifications: jest.fn().mockResolvedValue([
+            {
+              id: 'noti_1',
+              idempotency_key: `order-shipped-${FULFILLMENT_ID}`,
+              status: 'success',
+              created_at: new Date().toISOString(),
+            },
+          ]),
+        },
+      })
+
+      const result = await sendOrderShippedNotification(container, FULFILLMENT_ID, {
+        forceResend: true,
+      })
+
+      expect(result).toMatchObject({ sent: true })
+      expect(container._notificationService.createNotifications).toHaveBeenCalledTimes(1)
+
+      const call = container._notificationService.createNotifications.mock.calls[0][0]
+      expect(call.idempotency_key).toMatch(
+        new RegExp(`^order-shipped-${FULFILLMENT_ID}-resend-\\d+$`)
+      )
+      expect(call.trigger_type).toBe('admin.resend')
+      expect(call.resource_id).toBe(ORDER_ID)
+    })
   })
 })

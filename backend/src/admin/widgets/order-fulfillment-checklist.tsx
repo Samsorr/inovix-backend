@@ -18,6 +18,8 @@ import {
   allItemsTicked,
   deriveStepStates,
   hasOverride,
+  hasUnpackedNativeFulfillment,
+  labelFailureFromResponse,
   MIN_OVERRIDE_REASON,
   parseChecklist,
   paymentViewGate,
@@ -328,6 +330,11 @@ const OrderFulfillmentChecklistWidget = ({
   const [createOpen, setCreateOpen] = useState(false)
   const [shipOpen, setShipOpen] = useState(false)
   const [overrideStep, setOverrideStep] = useState<ChecklistOverrideStep | null>(null)
+  // The last label failure, kept on screen after the toast is gone: a toast is
+  // the wrong place for something the operator has to read, act on, or escalate.
+  const [labelError, setLabelError] = useState<
+    { message: string; details: string | null } | null
+  >(null)
 
   async function loadAll(quiet = false) {
     if (!quiet) setLoading(true)
@@ -416,6 +423,7 @@ const OrderFulfillmentChecklistWidget = ({
 
   async function createLabel() {
     setBusyAction(true)
+    setLabelError(null)
     try {
       const res = await fetch(`/admin/orders/${orderId}/dhl-label`, {
         method: "POST",
@@ -424,18 +432,35 @@ const OrderFulfillmentChecklistWidget = ({
       })
       const body = (await res.json().catch(() => ({}))) as {
         message?: string
+        code?: string
+        details?: string | null
         tracking_number?: string
       }
-      if (!res.ok) throw new Error(body.message ?? `Aanmaken mislukt (${res.status})`)
+      if (!res.ok) {
+        // The route knows WHY this failed (expired DHL key, rejected address,
+        // DHL outage, missing product weight, no box presets) and says so in
+        // Dutch, with the raw technical message in `details`. Both are kept:
+        // the toast disappears, the block under step 3 does not.
+        const failure = labelFailureFromResponse(res.status, body)
+        setLabelError(failure)
+        setCreateOpen(false)
+        toast.error("Label aanmaken mislukt", { description: failure.message })
+        return
+      }
       toast.success(
         `DHL-label aangemaakt${body.tracking_number ? ` | ${body.tracking_number}` : ""}`
       )
       setCreateOpen(false)
       await loadAll()
     } catch (err) {
-      toast.error("Label aanmaken mislukt", {
-        description: err instanceof Error ? err.message : "Onbekende fout",
-      })
+      // Network-level failure: the request never got an answer.
+      const failure = {
+        message:
+          "De aanvraag kon de server niet bereiken. Controleer de verbinding en probeer het opnieuw; er wordt nooit twee keer een label gekocht.",
+        details: err instanceof Error ? err.message : null,
+      }
+      setLabelError(failure)
+      toast.error("Label aanmaken mislukt", { description: failure.message })
     } finally {
       setBusyAction(false)
     }
@@ -448,14 +473,32 @@ const OrderFulfillmentChecklistWidget = ({
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
+        // Explicit resend: the backend switches to a unique idempotency key so
+        // the customer actually receives a second copy.
+        body: JSON.stringify({ resend: isResend }),
       })
-      const body = (await res.json().catch(() => ({}))) as { message?: string }
+      const body = (await res.json().catch(() => ({}))) as {
+        message?: string
+        sent?: boolean
+        reason?: string
+      }
       if (!res.ok) throw new Error(body.message ?? `Verzenden mislukt (${res.status})`)
-      toast.success(
-        isResend
-          ? "Verzendmail opnieuw verstuurd naar klant"
-          : "Gemarkeerd als verzonden | klant gemaild"
-      )
+      // Report what really happened. The route used to answer 200 even when the
+      // notification module skipped the send.
+      if (body.sent === false) {
+        toast.warning("Geen e-mail verstuurd", {
+          description:
+            body.reason === "already_sent"
+              ? "De klant heeft deze verzendmail al ontvangen."
+              : `De verzendmail is niet verstuurd (${body.reason ?? "onbekende reden"}).`,
+        })
+      } else {
+        toast.success(
+          isResend
+            ? "Verzendmail opnieuw verstuurd naar klant"
+            : "Gemarkeerd als verzonden | klant gemaild"
+        )
+      }
       setShipOpen(false)
       await loadAll()
     } catch (err) {
@@ -509,13 +552,18 @@ const OrderFulfillmentChecklistWidget = ({
   const itemsTicked = allItemsTicked(itemIds, checklist)
   const missingWeight = productsMissingWeight(order)
 
+  // A canceled label invalidates the package-closed tick: the box was opened
+  // again for the redo, so the stored tick from the previous attempt must not
+  // show as confirmed (deriveStepStates applies the same rule).
+  const packageClosed = Boolean(checklist.package_closed) && (hasLabel || shipped)
+
   const steps = deriveStepStates({
     paymentOk: gate.ok,
     paymentOverridden,
     itemsTicked,
     itemsOverridden,
     hasLabel,
-    packageClosed: Boolean(checklist.package_closed),
+    packageClosed,
     shipped,
   })
 
@@ -523,6 +571,10 @@ const OrderFulfillmentChecklistWidget = ({
   const isPs = methodData.dhl_option === "PS"
   const allDone = steps.ship === "done"
   const customerNote = customerNoteFromOrder(order)
+  // Someone pressed Medusa's native "Fulfill items". That fulfillment has no
+  // label and no tracking, and it takes the order out of the Verzendstation
+  // work queues, so it has to be said out loud here too.
+  const nativeFulfillment = hasUnpackedNativeFulfillment(order.fulfillments)
 
   return (
     <>
@@ -556,6 +608,37 @@ const OrderFulfillmentChecklistWidget = ({
             ) : null}
           </div>
         </div>
+
+        {/* Native "Fulfill items" warning. Rendered ONLY when that fulfillment
+            really exists, so it never becomes background noise. */}
+        {nativeFulfillment ? (
+          <div className="px-6 py-4">
+            <div
+              style={{
+                borderLeft: "3px solid #dc2626",
+                background: "#fef2f2",
+                padding: "10px 14px",
+              }}
+            >
+              <Text
+                size="xsmall"
+                weight="plus"
+                className="uppercase"
+                style={{ color: "#991b1b", letterSpacing: "0.06em" }}
+              >
+                Handmatige fulfillment gevonden
+              </Text>
+              <Text size="small" style={{ color: "#7f1d1d", marginTop: 4 }}>
+                Er is een fulfillment aangemaakt met de Engelse knop &quot;Fulfill
+                items&quot; in plaats van met deze checklist. Die fulfillment
+                heeft geen DHL-label en geen track-and-trace, en hij houdt de
+                bestelling uit het Verzendstation. Annuleer hem hierboven met
+                &quot;Cancel fulfillment&quot; en maak het label daarna met de knop
+                bij stap 3.
+              </Text>
+            </div>
+          </div>
+        ) : null}
 
         {/* Customer note. Rendered ONLY when the customer left one, so its
             presence is itself the signal that something needs reading. */}
@@ -712,6 +795,36 @@ const OrderFulfillmentChecklistWidget = ({
                   </Text>
                 </div>
               ) : null}
+              {labelError ? (
+                <div
+                  style={{ border: "1px solid #fca5a5", background: "#fef2f2", padding: "10px 12px" }}
+                >
+                  <Text size="small" weight="plus" style={{ color: "#991b1b" }}>
+                    Label aanmaken mislukt
+                  </Text>
+                  <Text size="small" style={{ color: "#7f1d1d", marginTop: "2px" }}>
+                    {labelError.message}
+                  </Text>
+                  {labelError.details ? (
+                    // Disclosure, not a wall of text: the operator escalates
+                    // with the real error instead of a screenshot of a generic one.
+                    <details style={{ marginTop: "6px" }}>
+                      <summary
+                        className="txt-small"
+                        style={{ color: "#7f1d1d", cursor: "pointer" }}
+                      >
+                        Technische details
+                      </summary>
+                      <Text
+                        size="xsmall"
+                        style={{ color: "#7f1d1d", marginTop: "4px", wordBreak: "break-word" }}
+                      >
+                        {labelError.details}
+                      </Text>
+                    </details>
+                  ) : null}
+                </div>
+              ) : null}
               <div>
                 <Button
                   variant="primary"
@@ -719,7 +832,7 @@ const OrderFulfillmentChecklistWidget = ({
                   disabled={steps.label !== "active" || missingWeight.length > 0 || busyAction}
                   onClick={() => setCreateOpen(true)}
                 >
-                  Maak DHL-label
+                  {labelError ? "Probeer opnieuw" : "Maak DHL-label"}
                 </Button>
               </div>
             </div>
@@ -730,13 +843,13 @@ const OrderFulfillmentChecklistWidget = ({
         <StepRow n={4} id="close" state={steps.close}>
           <label className="flex items-center gap-3" style={{ cursor: "pointer" }}>
             <Checkbox
-              checked={Boolean(checklist.package_closed) || shipped}
+              checked={packageClosed || shipped}
               disabled={steps.close === "locked" || shipped || busyAction}
               onCheckedChange={(v) => void setPackageClosed(v === true)}
             />
             <Text size="small">
               Het label is geprint, zit op het pakket en het pakket is dicht.
-              {checklist.package_closed
+              {packageClosed && checklist.package_closed
                 ? ` | bevestigd door ${checklist.package_closed.by_name}`
                 : ""}
             </Text>
@@ -777,7 +890,9 @@ const OrderFulfillmentChecklistWidget = ({
                 &quot;Mark as shipped&quot; doet hetzelfde als deze knop (klant
                 krijgt dezelfde mail, nooit dubbel), &quot;Mark as
                 delivered&quot; registreert alleen een bezorgdatum en is
-                optioneel.
+                optioneel. Gebruik &quot;Fulfill items&quot; NIET: die knop maakt
+                een fulfillment zonder DHL-label en haalt de bestelling uit het
+                Verzendstation.
               </Text>
             </div>
           )}

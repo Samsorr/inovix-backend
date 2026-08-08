@@ -38,6 +38,26 @@ import { generateEmailTemplate } from '../templates'
 import { isInviteUserData } from '../templates/invite-user'
 import { isOrderPlacedTemplateData } from '../templates/order-placed'
 
+// The first render of a react-email tree can suspend once (Tailwind warms an
+// internal cache), which under parallel load shows up as "A component
+// suspended while responding to synchronous input". Warm it here, the same way
+// email-templates-i18n.test.tsx does, so the render assertions below are
+// deterministic.
+beforeAll(async () => {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      ReactDOMServer.renderToStaticMarkup(
+        generateEmailTemplate('invite-user', {
+          inviteLink: 'https://example.com/invite',
+        }) as React.ReactElement
+      )
+      return
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+})
+
 describe('generateEmailTemplate', () => {
   describe('invite-user template', () => {
     it('returns a ReactNode for valid invite-user data', () => {
@@ -223,11 +243,101 @@ describe('isOrderPlacedTemplateData', () => {
     ).toBe(false)
   })
 
-  it('returns true when shippingAddress is null (typeof null is "object")', () => {
-    // Note: typeof null === 'object' in JavaScript, so the type guard
-    // does not reject null. This is a known quirk of the language.
+  // `typeof null === 'object'`, so the old guard let null through and the
+  // template threw on the first property access, inside renderAsync. The
+  // failure surfaced as "undefined - unknown error" with the real stack gone.
+  it('returns false when shippingAddress is null', () => {
     expect(
       isOrderPlacedTemplateData({ order: { id: 'order_1' }, shippingAddress: null })
-    ).toBe(true)
+    ).toBe(false)
+  })
+
+  it('returns false when order is null', () => {
+    expect(
+      isOrderPlacedTemplateData({ order: null, shippingAddress: { city: 'Berlin' } })
+    ).toBe(false)
+  })
+
+  it('returns false when the whole payload is null', () => {
+    expect(isOrderPlacedTemplateData(null)).toBe(false)
+    expect(isOrderPlacedTemplateData(undefined)).toBe(false)
+  })
+})
+
+describe('order-placed with the data shapes production actually produces', () => {
+  const shippingAddress = {
+    first_name: 'Jan',
+    last_name: 'de Vries',
+    address_1: 'Voorbeeldstraat 12',
+    city: 'Amsterdam',
+    postal_code: '1011 AB',
+    country_code: 'NL',
+  }
+
+  function baseOrder(extra: Record<string, unknown> = {}) {
+    return {
+      id: 'order_1',
+      display_id: 'ORD-001',
+      created_at: new Date().toISOString(),
+      email: 'buyer@example.com',
+      currency_code: 'EUR',
+      items: [
+        {
+          id: 'item-1',
+          product_title: 'BPC-157',
+          variant_title: '10mg',
+          quantity: 2,
+          unit_price: 45,
+        },
+      ],
+      ...extra,
+    }
+  }
+
+  function renderOrderPlaced(order: Record<string, unknown>): string {
+    const node = generateEmailTemplate('order-placed', { order, shippingAddress })
+    return ReactDOMServer.renderToStaticMarkup(node as React.ReactElement)
+  }
+
+  // Reproduced by the auditor: `order.summary.raw_current_order_total.value`
+  // with no optional chaining threw a TypeError inside renderAsync, which
+  // killed the whole confirmation email.
+  it('renders an order with no summary relation instead of throwing', () => {
+    const html = renderOrderPlaced(baseOrder())
+    expect(html).toContain('ORD-001')
+    expect(html).toContain('BPC-157')
+    expect(html).not.toContain('NaN')
+  })
+
+  it('renders an order whose summary is null', () => {
+    expect(() => renderOrderPlaced(baseOrder({ summary: null }))).not.toThrow()
+  })
+
+  it('renders an order whose summary has no raw_current_order_total', () => {
+    expect(() => renderOrderPlaced(baseOrder({ summary: {} }))).not.toThrow()
+  })
+
+  it('shows the total when the summary is present', () => {
+    const html = renderOrderPlaced(
+      baseOrder({ summary: { raw_current_order_total: { value: 90 } } })
+    )
+    expect(html).toContain('90,00')
+  })
+
+  // query.graph serves money/quantity as raw BigNumber objects on some paths.
+  it('does not render "NaN" for BigNumber-shaped unit_price', () => {
+    const html = renderOrderPlaced(
+      baseOrder({
+        items: [
+          {
+            id: 'item-1',
+            product_title: 'BPC-157',
+            quantity: 1,
+            unit_price: { value: '45' } as never,
+          },
+        ],
+      })
+    )
+    expect(html).not.toContain('NaN')
   })
 })

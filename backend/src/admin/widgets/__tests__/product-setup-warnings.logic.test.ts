@@ -5,6 +5,7 @@ import {
 
 const fullyConfigured: SetupCheckProduct = {
   id: "prod_ok",
+  status: "published",
   weight: 100,
   thumbnail: "https://example.com/img.jpg",
   shipping_profile: { id: "sp_1" },
@@ -92,22 +93,46 @@ describe("detectSetupIssues", () => {
     expect(issues[0].title).toContain("Retatrutide")
   })
 
-  it("ignores variants where manage_inventory is false (digital / no-stock items)", () => {
+  const unmanagedVariant = {
+    id: "var_1",
+    title: "Default variant",
+    sku: "PT-141-Vial-10mg",
+    manage_inventory: false,
+    prices: [{ amount: 1000 }],
+    inventory_items: [],
+  }
+
+  it("flags a published variant with manage_inventory=false | it sells with no stock check", () => {
+    const issues = detectSetupIssues({
+      ...fullyConfigured,
+      status: "published",
+      variants: [unmanagedVariant],
+    })
+    expect(issues.map((i) => i.key)).toEqual(["unmanaged:var_1"])
+    expect(issues[0].title).toContain("PT-141-Vial-10mg")
+    expect(issues[0].title).toContain("zonder voorraadcontrole")
+    expect(issues[0].detail).toContain("meer verkopen dan er ligt")
+  })
+
+  it("does not flag manage_inventory=false on a concept product (not customer facing)", () => {
     expect(
       detectSetupIssues({
         ...fullyConfigured,
-        variants: [
-          {
-            id: "var_1",
-            title: "Default variant",
-            sku: "ABC",
-            manage_inventory: false,
-            prices: [{ amount: 1000 }],
-            inventory_items: [],
-          },
-        ],
+        status: "draft",
+        variants: [unmanagedVariant],
       })
     ).toEqual([])
+  })
+
+  it("does not raise the missing-voorraadlocatie issue for unmanaged variants", () => {
+    // An unmanaged variant genuinely needs no inventory_level; the problem we
+    // report is the missing stock control itself, not the missing level.
+    const issues = detectSetupIssues({
+      ...fullyConfigured,
+      status: "published",
+      variants: [unmanagedVariant],
+    })
+    expect(issues.map((i) => i.key)).not.toContain("inventory:var_1")
   })
 
   it("falls back to SKU when variant title is the boilerplate 'Default variant'", () => {

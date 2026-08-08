@@ -1,10 +1,15 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework"
-import { Modules } from "@medusajs/framework/utils"
-import type {
-  IEventBusModuleService,
-  Logger,
-} from "@medusajs/framework/types"
+import type { Logger } from "@medusajs/framework/types"
 
+import { resendOrderConfirmation } from "../../../../../lib/order-notifications"
+
+// POST /admin/orders/:id/resend-confirmation
+//
+// This used to re-emit `order.placed`, which the subscriber dedups on
+// `order-confirmed-<orderId>` | so the route answered `{ ok: true }` while the
+// notification module silently skipped the send and the customer got nothing.
+// It now replays the stored confirmation under a unique idempotency key, and
+// only falls back to emitting the event when no confirmation exists yet.
 export async function POST(
   req: MedusaRequest,
   res: MedusaResponse
@@ -15,21 +20,35 @@ export async function POST(
     return
   }
 
-  const eventBus = req.scope.resolve(
-    Modules.EVENT_BUS
-  ) as IEventBusModuleService
   const logger = req.scope.resolve("logger") as Logger
 
   try {
-    await eventBus.emit({
-      name: "order.placed",
-      data: { id: orderId },
-    })
+    const result = await resendOrderConfirmation(req.scope, orderId)
 
-    logger.info(
-      `admin.resend-confirmation: re-emitted order.placed for ${orderId}`
-    )
-    res.status(200).json({ ok: true, orderId })
+    if (!result.ok) {
+      logger.error(
+        `admin.resend-confirmation failed for ${orderId}: ${result.message ?? "unknown"}`
+      )
+      res.status(500).json({ error: "Failed to trigger resend" })
+      return
+    }
+
+    if (result.resent) {
+      logger.info(
+        `admin.resend-confirmation: re-sent the order confirmation for ${orderId} to ${result.to}`
+      )
+    } else {
+      logger.info(
+        `admin.resend-confirmation: no confirmation on record for ${orderId}; re-emitted order.placed`
+      )
+    }
+
+    res.status(200).json({
+      ok: true,
+      orderId,
+      sent: result.resent === true,
+      emitted: result.emitted === true,
+    })
   } catch (err) {
     logger.error(
       `admin.resend-confirmation failed for ${orderId}: ${(err as Error).message}`

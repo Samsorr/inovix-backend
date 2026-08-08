@@ -1,19 +1,21 @@
-import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
-import {
-  INotificationModuleService,
-  Logger,
-} from '@medusajs/framework/types'
+import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { Logger } from '@medusajs/framework/types'
 import { EmailTemplates } from '../../modules/email-notifications/templates'
+import { sendEmailNotification } from '../../modules/email-notifications/send-notification'
 import { resolveOrderEmailLocale } from '../../lib/email-locale'
 import { ORDER_SHIPPED_I18N } from '../../modules/email-notifications/templates/email-i18n'
+
+export type SendOrderShippedResult = {
+  sent: boolean
+  /** Why nothing was sent. `already_sent` means the customer already has it. */
+  reason?: string
+}
 
 export async function sendOrderShippedNotification(
   container: any,
   fulfillmentId: string,
-  opts?: { noNotification?: boolean; orderId?: string }
-): Promise<{ sent: boolean }> {
-  const notificationModuleService: INotificationModuleService =
-    container.resolve(Modules.NOTIFICATION)
+  opts?: { noNotification?: boolean; orderId?: string; forceResend?: boolean }
+): Promise<SendOrderShippedResult> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const logger: Logger = container.resolve('logger')
 
@@ -21,7 +23,7 @@ export async function sendOrderShippedNotification(
     logger.info(
       `sendOrderShippedNotification: no_notification flag set for fulfillment ${fulfillmentId}; skipping`
     )
-    return { sent: false }
+    return { sent: false, reason: 'no_notification' }
   }
 
   // Resolve the order id first. Filtering orders on `fulfillments.id`
@@ -42,7 +44,7 @@ export async function sendOrderShippedNotification(
     logger.warn(
       `sendOrderShippedNotification: no order link found for fulfillment ${fulfillmentId}; skipping notification`
     )
-    return { sent: false }
+    return { sent: false, reason: 'no_order_link' }
   }
 
   const { data: orders } = await query.graph({
@@ -75,21 +77,21 @@ export async function sendOrderShippedNotification(
     logger.warn(
       `sendOrderShippedNotification: no order found for fulfillment ${fulfillmentId}; skipping notification`
     )
-    return { sent: false }
+    return { sent: false, reason: 'order_not_found' }
   }
 
   if (!order.email) {
     logger.warn(
       `sendOrderShippedNotification: order ${order.id} has no email; skipping notification`
     )
-    return { sent: false }
+    return { sent: false, reason: 'no_email' }
   }
 
   if (!order.shipping_address) {
     logger.warn(
       `sendOrderShippedNotification: order ${order.id} has no shipping_address; skipping notification`
     )
-    return { sent: false }
+    return { sent: false, reason: 'no_shipping_address' }
   }
 
   const fulfillment = order.fulfillments?.find(
@@ -100,7 +102,7 @@ export async function sendOrderShippedNotification(
     logger.warn(
       `sendOrderShippedNotification: fulfillment ${fulfillmentId} not found on order ${order.id}; skipping`
     )
-    return { sent: false }
+    return { sent: false, reason: 'fulfillment_not_found' }
   }
 
   const fulfillmentLineItemIds = new Set(
@@ -160,11 +162,27 @@ export async function sendOrderShippedNotification(
   }
   const replyTo = process.env.SUPPORT_EMAIL || process.env.CONTACT_EMAIL
 
-  await notificationModuleService.createNotifications({
+  // Automatic producers (shipment.created subscriber, auto-mark-shipped cron,
+  // the first click of the admin button) share one key so the customer gets
+  // exactly one mail. A deliberate operator resend passes `forceResend` and
+  // gets a unique key, because the whole point is to send it AGAIN. Without
+  // this the button was a silent no-op: the module skips any key that already
+  // exists with a non-failure status, and the route still answered 200.
+  const idempotencyKey = opts?.forceResend
+    ? `order-shipped-${fulfillmentId}-resend-${Date.now()}`
+    : `order-shipped-${fulfillmentId}`
+
+  const outcome = await sendEmailNotification(container, {
     to: order.email,
     channel: 'email',
     template: EmailTemplates.ORDER_SHIPPED,
-    idempotency_key: `order-shipped-${fulfillmentId}`,
+    idempotency_key: idempotencyKey,
+    resource_id: order.id,
+    resource_type: 'order',
+    // Three automatic producers share this path (the shipment.created
+    // subscriber, the auto-mark-shipped cron and the admin button's first
+    // click), so do not claim a specific event here.
+    trigger_type: opts?.forceResend ? 'admin.resend' : 'order.shipped',
     data: {
       emailOptions: {
         ...(replyTo ? { replyTo } : {}),
@@ -185,5 +203,5 @@ export async function sendOrderShippedNotification(
     },
   })
 
-  return { sent: true }
+  return { sent: outcome.sent, ...(outcome.reason ? { reason: outcome.reason } : {}) }
 }

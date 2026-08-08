@@ -7,7 +7,8 @@ export type PicklistItemView = {
   product_title: string
   variant_title: string | null
   sku: string | null
-  quantity: number
+  /** null when the quantity could not be resolved | rendered as "?x". */
+  quantity: number | null
 }
 
 export type PicklistView = {
@@ -32,6 +33,12 @@ export function escapeHtml(s: string): string {
     .split("'").join("&#39;")
 }
 
+// An unresolved quantity must never print as a number: "?" tells the packer to
+// check the order in admin, "0x" would tell them to pack nothing.
+function qty(v: number | null | undefined): string {
+  return typeof v === "number" && Number.isFinite(v) ? String(v) : "?"
+}
+
 const STEPS = [
   "Betaling gecontroleerd (stap 1 staat groen in het systeem)",
   "Alle items hieronder verzameld en afgevinkt",
@@ -48,7 +55,7 @@ export function buildPicklistHtml(view: PicklistView): string {
   <td>${escapeHtml(i.product_title)}</td>
   <td>${escapeHtml(i.variant_title ?? "")}</td>
   <td>${escapeHtml(i.sku ?? "")}</td>
-  <td class="qty">${Number(i.quantity)}x</td>
+  <td class="qty">${qty(i.quantity)}x</td>
 </tr>`
     )
     .join("\n")

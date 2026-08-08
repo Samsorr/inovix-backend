@@ -9,21 +9,40 @@ import { markDhlOrderShipped } from "../../../../../../lib/mark-dhl-shipped"
 // The heavy lifting lives in lib/mark-dhl-shipped so the auto-mark-shipped
 // job runs the identical flow; the email is idempotency-keyed so the two
 // paths never double-send.
+//
+// Body `{ resend: true }` is the operator's deliberate "stuur de verzendmail
+// opnieuw" action: it uses a unique idempotency key so the customer really
+// gets a second copy. Without it this route was a silent no-op on an
+// already-mailed order while still answering 200. The response now reports
+// what actually happened so the admin toast cannot lie.
 export async function POST(
   req: MedusaRequest,
   res: MedusaResponse
 ): Promise<void> {
   const orderId = req.params.id
   const logger = req.scope.resolve("logger") as Logger
+  const body = (req.body ?? {}) as { resend?: boolean }
 
   try {
-    const result = await markDhlOrderShipped(req.scope, orderId)
+    const result = await markDhlOrderShipped(req.scope, orderId, {
+      resend: body.resend === true,
+    })
 
     if (result.ok) {
-      logger.info(
-        `admin.dhl-label.send-email: shipped email sent for fulfillment ${result.fulfillment_id} on order ${orderId}`
-      )
-      res.status(200).json({ sent: true })
+      if (result.email_sent) {
+        logger.info(
+          `admin.dhl-label.send-email: shipped email sent for fulfillment ${result.fulfillment_id} on order ${orderId}`
+        )
+      } else {
+        logger.warn(
+          `admin.dhl-label.send-email: NO email sent for fulfillment ${result.fulfillment_id} on order ${orderId} (${result.email_reason ?? "unknown"})`
+        )
+      }
+      res.status(200).json({
+        sent: result.email_sent === true,
+        already_shipped: result.already_shipped === true,
+        ...(result.email_reason ? { reason: result.email_reason } : {}),
+      })
       return
     }
 

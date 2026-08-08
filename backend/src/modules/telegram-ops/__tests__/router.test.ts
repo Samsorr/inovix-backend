@@ -44,6 +44,34 @@ describe('handleUpdate', () => {
     expect(svc.sendTo).not.toHaveBeenCalledWith('999', expect.stringContaining('/orders'))
   })
 
+  it('a stranger is answered only on first contact, so flooding the bot costs no sends', async () => {
+    // The bot username is public: anyone can DM it. If every message got a
+    // reply, a flood would burn the bot's Telegram quota and a real "New
+    // order" notify (whose key is claimed before the send) would be lost for
+    // good. notify() returning false means "already seen this chat" | stay
+    // silent from then on.
+    const svc = makeSvc(['111'])
+    svc.notify.mockResolvedValueOnce(true).mockResolvedValue(false)
+
+    await handleUpdate(makeContainer(svc) as any, msgUpdate(999, '/help') as any)
+    expect(svc.sendTo).toHaveBeenCalledTimes(1)
+
+    for (let i = 0; i < 25; i++) {
+      await handleUpdate(makeContainer(svc) as any, msgUpdate(999, `spam ${i}`) as any)
+    }
+    expect(svc.sendTo).toHaveBeenCalledTimes(1) // still just the first refusal
+    expect(svc.notify).toHaveBeenCalledTimes(26) // dedup key, one row ever
+  })
+
+  it('never sends a stranger anything the operator was not also told about', async () => {
+    // The refusal must not outrun the notify: if the claim fails the stranger
+    // gets nothing, so an attacker can never produce a send we did not intend.
+    const svc = makeSvc(['111'])
+    svc.notify.mockResolvedValue(false)
+    await handleUpdate(makeContainer(svc) as any, msgUpdate(999, '/help') as any)
+    expect(svc.sendTo).not.toHaveBeenCalled()
+  })
+
   it('a stranger triggers ONE operator notification with the chat id (dedup key)', async () => {
     const svc = makeSvc(['111'])
     await handleUpdate(makeContainer(svc) as any, msgUpdate(999, '/start') as any)

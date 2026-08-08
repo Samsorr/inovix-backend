@@ -20,6 +20,7 @@ import {
 import {
   normalizeBrokerPayment,
 } from "../admin/widgets/order-payment-broker.logic"
+import { firstQty, itemQuantity, ITEM_QUANTITY_FIELDS } from "./item-quantity"
 import { Sentry } from "./instrument"
 
 const BROKER_PROVIDER_ID = "pp_via_broker_via_broker"
@@ -31,11 +32,9 @@ export const AUTO_COMPLETE_ORDER_FIELDS = [
   "metadata",
   "items.id",
   // items.quantity is unreliable through query.graph on live data (can come
-  // back undefined); request it four ways and resolve with firstQty.
-  "items.quantity",
-  "items.raw_quantity",
-  "items.detail.quantity",
-  "items.detail.raw_quantity",
+  // back undefined); request all four shapes (lib/item-quantity.ts) and
+  // resolve with itemQuantity.
+  ...ITEM_QUANTITY_FIELDS,
   "items.detail.shipped_quantity",
   "items.detail.raw_shipped_quantity",
   "fulfillments.id",
@@ -83,23 +82,6 @@ export type AutoCompleteOrderRow = {
   } | null> | null
 }
 
-// Strict numeric resolution (unlike toAmount, garbage stays null instead of
-// becoming 0): bigNumber columns surface as raw { value, precision } objects.
-function asQty(v: unknown): number | null {
-  if (v == null) return null
-  if (typeof v === "object") return asQty((v as { value?: unknown }).value)
-  const n = Number(v)
-  return Number.isFinite(n) ? n : null
-}
-
-function firstQty(...vals: unknown[]): number | null {
-  for (const v of vals) {
-    const n = asQty(v)
-    if (n != null) return n
-  }
-  return null
-}
-
 // Pure guard: only a pending order whose every non-canceled fulfillment is
 // shipped, every item fully shipped, and whose broker payment is fully
 // captured with zero refunds (or carries a logged payment override, e.g. a
@@ -115,12 +97,7 @@ export function shouldAutoComplete(row: AutoCompleteOrderRow): boolean {
   if (!active.every((f) => f!.shipped_at)) return false
 
   for (const item of (row.items ?? []).filter(Boolean)) {
-    const qty = firstQty(
-      item!.quantity,
-      item!.raw_quantity,
-      item!.detail?.quantity,
-      item!.detail?.raw_quantity
-    )
+    const qty = itemQuantity(item)
     // Unresolvable quantity: fall back to the fulfillment check above rather
     // than blocking completion forever on a data quirk.
     if (qty == null) continue

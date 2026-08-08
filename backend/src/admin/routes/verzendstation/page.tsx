@@ -21,9 +21,20 @@ type QueueEntry = {
   customer_note: string | null
 }
 
+type AttentionReason = {
+  code: "payment_unconfirmed" | "manual_fulfillment"
+  label: string
+  action: string
+}
+
+type AttentionEntry = QueueEntry & { reasons: AttentionReason[] }
+
 type Queues = {
   to_process: QueueEntry[]
   to_ship: QueueEntry[]
+  // Added later than the two queues: an older backend build (or a cached
+  // response) simply omits it, so every read is guarded.
+  needs_attention?: AttentionEntry[]
 }
 
 const REFRESH_MS = 60_000
@@ -62,6 +73,55 @@ function OrderRow({ entry, ageLabel }: { entry: QueueEntry; ageLabel: string }) 
         </div>
       </div>
     </Link>
+  )
+}
+
+// Deliberately its own block instead of a third queue column: these orders are
+// NOT pick work (packing one is either blocked server-side by the payment gate
+// or would land on top of a native fulfillment), so mixing them into "Te
+// verwerken" would send the operator into a dead end. They are drift that
+// needs a decision, so they get their own labelled, explained bucket at the
+// top of the page, above the two work queues.
+function AttentionBlock({ entries, now }: { entries: AttentionEntry[]; now: number }) {
+  return (
+    <Container className="p-0" style={{ border: "1px solid #f59e0b" }}>
+      <div className="px-4 py-3" style={{ borderBottom: "1px solid #f59e0b", background: "#fffbeb" }}>
+        <Heading level="h2">Aandacht nodig ({entries.length})</Heading>
+        <Text size="small" className="text-ui-fg-subtle">
+          Deze bestellingen staan NIET in de werkrijen hiernaast en worden niet
+          vanzelf opgelost. Verzend ze pas als het probleem is opgelost.
+        </Text>
+      </div>
+      <div className="flex flex-col gap-2 p-4">
+        {entries.map((e) => (
+          <Link
+            key={e.id}
+            to={`/verzendstation/${e.id}`}
+            className="block border border-ui-border-base bg-ui-bg-base px-4 py-3 hover:bg-ui-bg-base-hover"
+            style={{ textDecoration: "none" }}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <Text size="large" weight="plus">
+                #{e.display_id ?? "?"} | {e.customer_name || "Onbekende klant"}
+              </Text>
+              <Text size="small" className="text-ui-fg-subtle whitespace-nowrap">
+                {e.created_at ? `${formatAge(e.created_at, now)} besteld` : ""}
+              </Text>
+            </div>
+            {e.reasons.map((r) => (
+              <div key={r.code} className="mt-2">
+                <Text size="small" weight="plus" style={{ color: "#b45309" }}>
+                  {r.label}
+                </Text>
+                <Text size="small" className="text-ui-fg-subtle">
+                  {r.action}
+                </Text>
+              </div>
+            ))}
+          </Link>
+        ))}
+      </div>
+    </Container>
   )
 }
 
@@ -134,6 +194,7 @@ const VerzendstationPage = () => {
   }, [])
 
   const now = updatedAt ?? Date.now()
+  const attention = queues?.needs_attention ?? []
 
   return (
     <div className="flex flex-col gap-4">
@@ -145,6 +206,14 @@ const VerzendstationPage = () => {
               Alle bestellingen die actie nodig hebben. Klik op een bestelling en
               volg de verzendchecklist. Ververst elke minuut.
             </Text>
+            {attention.length > 0 ? (
+              <Text size="small" weight="plus" className="mt-1" style={{ color: "#b45309" }}>
+                Let op: {attention.length}{" "}
+                {attention.length === 1 ? "bestelling heeft" : "bestellingen hebben"}{" "}
+                aandacht nodig (zie hieronder). Een lege werkrij betekent dan niet
+                dat alles klaar is.
+              </Text>
+            ) : null}
           </div>
           {error ? (
             <Text size="small" className="text-ui-fg-error">
@@ -161,23 +230,32 @@ const VerzendstationPage = () => {
           </Text>
         </Container>
       ) : queues ? (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <QueueColumn
-            title="Te verwerken"
-            subtitle="Betaald, nog geen DHL-label"
-            entries={queues.to_process}
-            emptyLabel="Niets te verwerken. Goed bezig!"
-            ageOf={(e) => (e.created_at ? `${formatAge(e.created_at, now)} besteld` : "")}
-          />
-          <QueueColumn
-            title="Ingepakt, nog niet verzonden"
-            subtitle="Label gemaakt, maar nog niet gemarkeerd als verzonden"
-            entries={queues.to_ship}
-            emptyLabel="Alles is verzonden."
-            ageOf={(e) => (e.packed_at ? `label ${formatAge(e.packed_at, now)}` : "")}
-            urgent
-          />
-        </div>
+        <>
+          {attention.length > 0 ? <AttentionBlock entries={attention} now={now} /> : null}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <QueueColumn
+              title="Te verwerken"
+              subtitle="Betaald, nog geen DHL-label"
+              entries={queues.to_process}
+              // "Goed bezig!" may only be said when there is genuinely nothing
+              // left, attention rows included.
+              emptyLabel={
+                attention.length > 0
+                  ? "Niets te verwerken, maar kijk eerst naar 'Aandacht nodig' hierboven."
+                  : "Niets te verwerken. Goed bezig!"
+              }
+              ageOf={(e) => (e.created_at ? `${formatAge(e.created_at, now)} besteld` : "")}
+            />
+            <QueueColumn
+              title="Ingepakt, nog niet verzonden"
+              subtitle="Label gemaakt, maar nog niet gemarkeerd als verzonden"
+              entries={queues.to_ship}
+              emptyLabel="Alles is verzonden."
+              ageOf={(e) => (e.packed_at ? `label ${formatAge(e.packed_at, now)}` : "")}
+              urgent
+            />
+          </div>
+        </>
       ) : null}
     </div>
   )

@@ -55,6 +55,17 @@ describe("buildPicklistHtml", () => {
     expect(html).not.toContain("Klantopmerking")
   })
 
+  it("prints ?x for an unresolved quantity instead of 0x", () => {
+    // A quantity the route could not resolve from any query.graph shape must
+    // read as "check this order", never as "pack nothing".
+    const unknownQty = buildPicklistHtml({
+      ...view,
+      items: [{ product_title: "BPC-157", variant_title: "5mg", sku: "BPC-5", quantity: null }],
+    })
+    expect(unknownQty).toContain(">?x<")
+    expect(unknownQty).not.toContain(">0x<")
+  })
+
   describe("customer note", () => {
     const noted = buildPicklistHtml({
       ...view,

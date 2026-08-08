@@ -31,12 +31,33 @@ export function formatEmailDate(
   }
 }
 
+/**
+ * `query.graph` serves money and quantity fields as raw BigNumber objects
+ * (`{ value: "45", precision: 20 }`) on some paths, and `Number()` on that
+ * object is NaN, which rendered "€ NaN" in the line items. Accept both shapes.
+ */
+export function toEmailNumber(value: unknown): number {
+  if (value == null) return 0
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  if (typeof value === 'object' && 'value' in (value as Record<string, unknown>)) {
+    return toEmailNumber((value as Record<string, unknown>).value)
+  }
+  return 0
+}
+
 export function formatEmailMoney(
-  value: number | string | undefined,
+  value: number | string | undefined | null | Record<string, unknown>,
   currencyCode: string | undefined,
   locale: EmailLocale
 ): string {
-  const numeric = typeof value === 'string' ? Number(value) : (value ?? 0)
+  const numeric =
+    typeof value === 'number' ? value : toEmailNumber(value)
+  // Never print "€ NaN" at a customer.
+  if (!Number.isFinite(numeric)) return ''
   try {
     return new Intl.NumberFormat(EMAIL_DATE_LOCALE[locale], {
       style: 'currency',
@@ -301,6 +322,18 @@ export const PAYMENT_FAILED_I18N = {
 // Order cancelled
 // ---------------------------------------------------------------------------
 
+export type OrderCancelledRefundState =
+  | 'refund_pending'
+  | 'refunded'
+  | 'not_charged'
+
+/**
+ * Cancellation copy is MONEY-STATE DEPENDENT. The old single-variant copy told
+ * every cancelled customer "het volledige bedrag wordt teruggestort", including
+ * orders where nothing was ever captured. Promising a refund in writing for a
+ * payment that never happened is the kind of thing that turns into a
+ * chargeback. Each state below states only what actually happened.
+ */
 export const ORDER_CANCELLED_I18N = {
   nl: {
     subject: (displayId: string | number) =>
@@ -309,16 +342,38 @@ export const ORDER_CANCELLED_I18N = {
     heading: 'Uw bestelling is geannuleerd',
     orderNumber: 'Ordernummer',
     greeting: 'Beste',
-    body: (displayId: string | number) =>
-      `We bevestigen dat uw bestelling #${displayId} is geannuleerd. Het volledige bedrag wordt teruggestort naar de oorspronkelijke betaalmethode.`,
     cancelledItems: 'Geannuleerde artikelen',
-    refundAmount: 'Terug te storten bedrag',
     inclVat: 'Inclusief btw en verzendkosten.',
-    whenHeading: 'Wanneer ontvangt u uw geld terug?',
-    whenBody1:
-      'De terugstorting wordt direct in gang gezet. Afhankelijk van uw bank of kaartuitgever kan het 5 tot 10 werkdagen duren voordat het bedrag op uw rekening zichtbaar is.',
-    whenBody2:
-      'U ontvangt een aparte bevestiging zodra de terugstorting is verwerkt. Als u na 10 werkdagen niets heeft ontvangen, neem dan contact met ons op zodat we het samen kunnen nakijken.',
+    refund_pending: {
+      body: (displayId: string | number) =>
+        `We bevestigen dat uw bestelling #${displayId} is geannuleerd. Het onderstaande bedrag wordt teruggestort naar de oorspronkelijke betaalmethode.`,
+      amountLabel: 'Terug te storten bedrag',
+      whenHeading: 'Wanneer ontvangt u uw geld terug?',
+      whenBody1:
+        'Wij zetten de terugstorting in gang. Afhankelijk van uw bank of kaartuitgever kan het 5 tot 10 werkdagen duren voordat het bedrag op uw rekening zichtbaar is.',
+      whenBody2:
+        'U ontvangt een aparte bevestiging zodra de terugstorting is verwerkt. Als u na 10 werkdagen niets heeft ontvangen, neem dan contact met ons op zodat we het samen kunnen nakijken.',
+    },
+    refunded: {
+      body: (displayId: string | number) =>
+        `We bevestigen dat uw bestelling #${displayId} is geannuleerd. Het betaalde bedrag is al teruggestort naar de oorspronkelijke betaalmethode.`,
+      amountLabel: 'Teruggestort bedrag',
+      whenHeading: 'Wanneer staat het bedrag op uw rekening?',
+      whenBody1:
+        'De terugstorting is verwerkt. Afhankelijk van uw bank of kaartuitgever kan het 5 tot 10 werkdagen duren voordat het bedrag op uw rekening zichtbaar is.',
+      whenBody2:
+        'Als u na 10 werkdagen niets heeft ontvangen, neem dan contact met ons op zodat we het samen kunnen nakijken.',
+    },
+    not_charged: {
+      body: (displayId: string | number) =>
+        `We bevestigen dat uw bestelling #${displayId} is geannuleerd. Er is voor deze bestelling geen bedrag afgeschreven, dus er volgt ook geen terugstorting.`,
+      amountLabel: 'Bestelbedrag (niet betaald)',
+      whenHeading: 'Er wordt niets teruggestort',
+      whenBody1:
+        'Omdat de betaling niet is voltooid, is er nooit geld van uw rekening afgeschreven. U hoeft dus niets terug te verwachten.',
+      whenBody2:
+        'Ziet u toch een afschrijving voor deze bestelling? Neem dan contact met ons op, dan zoeken we het direct voor u uit.',
+    },
   },
   de: {
     subject: (displayId: string | number) =>
@@ -327,16 +382,38 @@ export const ORDER_CANCELLED_I18N = {
     heading: 'Ihre Bestellung wurde storniert',
     orderNumber: 'Bestellnummer',
     greeting: 'Sehr geehrte/r',
-    body: (displayId: string | number) =>
-      `Wir bestätigen, dass Ihre Bestellung #${displayId} storniert wurde. Der gesamte Betrag wird auf die ursprüngliche Zahlungsmethode zurückerstattet.`,
     cancelledItems: 'Stornierte Artikel',
-    refundAmount: 'Zu erstattender Betrag',
     inclVat: 'Inklusive MwSt. und Versandkosten.',
-    whenHeading: 'Wann erhalten Sie Ihr Geld zurück?',
-    whenBody1:
-      'Die Rückerstattung wird sofort eingeleitet. Je nach Bank oder Kartenanbieter kann es 5 bis 10 Werktage dauern, bis der Betrag auf Ihrem Konto sichtbar ist.',
-    whenBody2:
-      'Sie erhalten eine separate Bestätigung, sobald die Rückerstattung verarbeitet wurde. Sollten Sie nach 10 Werktagen nichts erhalten haben, kontaktieren Sie uns bitte, damit wir das gemeinsam prüfen können.',
+    refund_pending: {
+      body: (displayId: string | number) =>
+        `Wir bestätigen, dass Ihre Bestellung #${displayId} storniert wurde. Der unten genannte Betrag wird auf die ursprüngliche Zahlungsmethode zurückerstattet.`,
+      amountLabel: 'Zu erstattender Betrag',
+      whenHeading: 'Wann erhalten Sie Ihr Geld zurück?',
+      whenBody1:
+        'Wir leiten die Rückerstattung ein. Je nach Bank oder Kartenanbieter kann es 5 bis 10 Werktage dauern, bis der Betrag auf Ihrem Konto sichtbar ist.',
+      whenBody2:
+        'Sie erhalten eine separate Bestätigung, sobald die Rückerstattung verarbeitet wurde. Sollten Sie nach 10 Werktagen nichts erhalten haben, kontaktieren Sie uns bitte, damit wir das gemeinsam prüfen können.',
+    },
+    refunded: {
+      body: (displayId: string | number) =>
+        `Wir bestätigen, dass Ihre Bestellung #${displayId} storniert wurde. Der bezahlte Betrag wurde bereits auf die ursprüngliche Zahlungsmethode zurückerstattet.`,
+      amountLabel: 'Erstatteter Betrag',
+      whenHeading: 'Wann ist der Betrag auf Ihrem Konto?',
+      whenBody1:
+        'Die Rückerstattung wurde verarbeitet. Je nach Bank oder Kartenanbieter kann es 5 bis 10 Werktage dauern, bis der Betrag auf Ihrem Konto sichtbar ist.',
+      whenBody2:
+        'Sollten Sie nach 10 Werktagen nichts erhalten haben, kontaktieren Sie uns bitte, damit wir das gemeinsam prüfen können.',
+    },
+    not_charged: {
+      body: (displayId: string | number) =>
+        `Wir bestätigen, dass Ihre Bestellung #${displayId} storniert wurde. Für diese Bestellung wurde kein Betrag abgebucht, es erfolgt daher auch keine Rückerstattung.`,
+      amountLabel: 'Bestellbetrag (nicht bezahlt)',
+      whenHeading: 'Es wird nichts zurückerstattet',
+      whenBody1:
+        'Da die Zahlung nicht abgeschlossen wurde, wurde nie Geld von Ihrem Konto abgebucht. Sie müssen also nichts zurückerwarten.',
+      whenBody2:
+        'Sehen Sie dennoch eine Abbuchung für diese Bestellung? Dann kontaktieren Sie uns bitte, wir klären das umgehend für Sie.',
+    },
   },
   en: {
     subject: (displayId: string | number) =>
@@ -345,16 +422,38 @@ export const ORDER_CANCELLED_I18N = {
     heading: 'Your order has been cancelled',
     orderNumber: 'Order number',
     greeting: 'Dear',
-    body: (displayId: string | number) =>
-      `We confirm that your order #${displayId} has been cancelled. The full amount will be refunded to the original payment method.`,
     cancelledItems: 'Cancelled items',
-    refundAmount: 'Amount to be refunded',
     inclVat: 'Including VAT and shipping costs.',
-    whenHeading: 'When will you receive your money back?',
-    whenBody1:
-      'The refund is initiated immediately. Depending on your bank or card issuer, it can take 5 to 10 business days before the amount is visible in your account.',
-    whenBody2:
-      'You will receive a separate confirmation once the refund has been processed. If you have not received anything after 10 business days, please contact us so we can look into it together.',
+    refund_pending: {
+      body: (displayId: string | number) =>
+        `We confirm that your order #${displayId} has been cancelled. The amount shown below will be refunded to the original payment method.`,
+      amountLabel: 'Amount to be refunded',
+      whenHeading: 'When will you receive your money back?',
+      whenBody1:
+        'We are initiating the refund. Depending on your bank or card issuer, it can take 5 to 10 business days before the amount is visible in your account.',
+      whenBody2:
+        'You will receive a separate confirmation once the refund has been processed. If you have not received anything after 10 business days, please contact us so we can look into it together.',
+    },
+    refunded: {
+      body: (displayId: string | number) =>
+        `We confirm that your order #${displayId} has been cancelled. The amount paid has already been refunded to the original payment method.`,
+      amountLabel: 'Amount refunded',
+      whenHeading: 'When will the amount be in your account?',
+      whenBody1:
+        'The refund has been processed. Depending on your bank or card issuer, it can take 5 to 10 business days before the amount is visible in your account.',
+      whenBody2:
+        'If you have not received anything after 10 business days, please contact us so we can look into it together.',
+    },
+    not_charged: {
+      body: (displayId: string | number) =>
+        `We confirm that your order #${displayId} has been cancelled. No amount was charged for this order, so there is no refund to expect.`,
+      amountLabel: 'Order amount (not paid)',
+      whenHeading: 'Nothing will be refunded',
+      whenBody1:
+        'Because the payment was never completed, no money was ever taken from your account. There is nothing for you to expect back.',
+      whenBody2:
+        'Do you still see a charge for this order? Please contact us and we will sort it out for you right away.',
+    },
   },
 } as const
 

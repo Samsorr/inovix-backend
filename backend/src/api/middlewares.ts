@@ -67,6 +67,24 @@ export default defineMiddlewares({
       ],
     },
     {
+      // @InovixOpsBot's username is public and searchable, so anyone can DM it
+      // and make Telegram deliver an update here | with a valid secret header,
+      // because Telegram is the one calling. The allowlist gate in the router
+      // stops the command from running, but each delivery still costs an
+      // outbound send and a DB write, so cap the volume too. Nothing
+      // operator-critical rides this route: order/stock/deploy pushes are
+      // outbound from subscribers and jobs, and Telegram redelivers whatever
+      // we answer 429 to.
+      matcher: "/webhooks/telegram",
+      methods: ["POST"],
+      middlewares: [
+        rateLimit({
+          windowMs: MINUTE,
+          max: 60,
+        }),
+      ],
+    },
+    {
       // Live parcel tracking for the account order page: customers only, and
       // the route itself re-checks the order belongs to the caller.
       matcher: "/store/orders/:id/dhl-tracking",

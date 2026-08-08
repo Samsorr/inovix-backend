@@ -4,6 +4,9 @@
 
 export type SetupCheckProduct = {
   id?: string
+  // "published" = live on the website. Only then does a variant without stock
+  // control actually sell.
+  status?: string | null
   // product-level weight (grams). The DHL label flow reads this (via
   // item.variant.product.weight); without it a paid order cannot be shipped.
   weight?: number | null
@@ -94,8 +97,25 @@ export function detectSetupIssues(
       }
     }
 
+    // No stock control at all. Medusa drops unmanaged variants from every stock
+    // gate (add-to-cart check, reservation at cart.complete, the DHL decrement),
+    // so on a live product this sells unlimited quantities off a shelf that may
+    // be empty and the number never moves. Only flag it once the product is
+    // published; on a concept product it is not customer facing yet.
+    if (v.manage_inventory !== true) {
+      if (p.status === "published") {
+        issues.push({
+          key: `unmanaged:${v.id}`,
+          title: `Variant "${variantLabel(v)}" verkoopt zonder voorraadcontrole`,
+          detail:
+            'Voorraadbeheer staat uit voor deze variant. De site toont hem altijd als "Op voorraad", een klant kan elk aantal bestellen, er wordt niets gereserveerd en bij verzending gaat de voorraad niet omlaag. Je kunt dus meer verkopen dan er ligt zonder dat iets waarschuwt.',
+          fix: 'Tel eerst wat er fysiek ligt. Open dan het tabblad "Inventaris" hieronder, zet dat aantal op de locatie en schakel daarna pas voorraadbeheer in. In die volgorde: eerder inschakelen zonder voorraadregel laat een al betaalde bestelling mislukken.',
+        })
+      }
+      continue
+    }
+
     // Inventory location | only relevant when stock is managed.
-    if (v.manage_inventory !== true) continue
     const items = v.inventory_items ?? []
     const hasAnyLevel = items.some(
       (it) => (it.inventory?.location_levels ?? []).length > 0

@@ -3,9 +3,15 @@ import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 
 import { buildPicklistHtml, type PicklistView } from "./build-html"
 import { customerNoteFromOrder } from "../../../../../admin/widgets/customer-note.logic"
-// Direct query.graph returns quantities as raw BigNumber objects
-// ({value, precision}); Number() on those is NaN. toAmount parses all shapes.
-import { toAmount } from "../../../../../admin/widgets/order-payment-broker.logic"
+// Direct query.graph serves quantities in several shapes: undefined on
+// items.quantity with the real value on items.detail, and bigNumber columns as
+// raw {value, precision} objects. Request all four (ITEM_QUANTITY_FIELDS) and
+// resolve with the shared helper | a single-field read prints "0x" on the paper
+// the packer fills the box from.
+import {
+  itemQuantity,
+  ITEM_QUANTITY_FIELDS,
+} from "../../../../../lib/item-quantity"
 
 // GET /admin/orders/:id/picklist | printable A4 pick list. Behind the standard
 // admin session auth (all /admin routes are). Opened in a new tab by the
@@ -22,7 +28,7 @@ const ORDER_FIELDS = [
   "metadata",
   "shipping_address.*",
   "items.id",
-  "items.quantity",
+  ...ITEM_QUANTITY_FIELDS,
   "items.title",
   "items.product_title",
   "items.variant_title",
@@ -70,11 +76,15 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
           .filter(Boolean)
           .join(" | ") || null
       : null,
-    items: ((order.items ?? []) as any[]).map((i) => ({
+    // Live relation arrays can contain null elements (commit 9d7e9fa); one
+    // would otherwise 500 the print instead of printing the other lines.
+    items: ((order.items ?? []) as any[]).filter(Boolean).map((i) => ({
       product_title: i.product_title ?? i.title ?? "Onbekend product",
       variant_title: i.variant_title ?? null,
       sku: i.variant_sku ?? null,
-      quantity: toAmount(i.quantity as never),
+      // null (not 0) when no shape resolves: build-html then prints "?x", so a
+      // data quirk reads as "check this order", never as "pick nothing".
+      quantity: itemQuantity(i),
     })),
     customer_note: customerNoteFromOrder(order),
   }

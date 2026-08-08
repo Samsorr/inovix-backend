@@ -1,5 +1,8 @@
 import type { EmailLocale } from '../../lib/email-locale'
-import { ORDER_PLACED_TEXT_I18N } from '../../modules/email-notifications/templates/email-i18n'
+import {
+  ORDER_PLACED_TEXT_I18N,
+  toEmailNumber,
+} from '../../modules/email-notifications/templates/email-i18n'
 
 type Addressish = {
   first_name?: string | null
@@ -36,12 +39,15 @@ export function buildOrderConfirmationText(
   const itemsText = (order.items ?? [])
     .map((item) => {
       const variant = item.variant_title ? ` | ${item.variant_title}` : ''
-      const lineTotal = (Number(item.unit_price ?? 0) * Number(item.quantity ?? 0)).toFixed(2)
+      const lineTotal = (
+        toEmailNumber(item.unit_price) * toEmailNumber(item.quantity)
+      ).toFixed(2)
       return `- ${item.product_title}${variant} × ${item.quantity} (${lineTotal} ${currency})`
     })
     .join('\n')
   const totalValue = order.summary?.raw_current_order_total?.value
-  const totalText = totalValue != null ? `${Number(totalValue).toFixed(2)} ${currency}` : ''
+  const totalText =
+    totalValue != null ? `${toEmailNumber(totalValue).toFixed(2)} ${currency}` : ''
   const addrLines = [
     `${addr.first_name ?? ''} ${addr.last_name ?? ''}`.trim(),
     addr.company,

@@ -1,7 +1,8 @@
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
-import { INotificationModuleService, Logger } from '@medusajs/framework/types'
+import { Logger } from '@medusajs/framework/types'
 import { SubscriberArgs, SubscriberConfig } from '@medusajs/medusa'
 import { EmailTemplates } from '../modules/email-notifications/templates'
+import { sendEmailNotification } from '../modules/email-notifications/send-notification'
 import { Sentry } from '../lib/instrument'
 import { buildOrderConfirmationText } from './_helpers/order-confirmation-text'
 import { resolveOrderEmailLocale } from '../lib/email-locale'
@@ -11,7 +12,6 @@ export default async function paymentCapturedHandler({
   event: { data },
   container,
 }: SubscriberArgs<{ id: string }>) {
-  const notificationModuleService: INotificationModuleService = container.resolve(Modules.NOTIFICATION)
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const logger: Logger = container.resolve('logger')
 
@@ -59,7 +59,7 @@ export default async function paymentCapturedHandler({
     const replyTo = process.env.SUPPORT_EMAIL || process.env.CONTACT_EMAIL
     const textBody = buildOrderConfirmationText(order, order.shipping_address, locale)
 
-    await notificationModuleService.createNotifications({
+    await sendEmailNotification(container, {
       to: order.email,
       channel: 'email',
       template: EmailTemplates.ORDER_PLACED,
