@@ -2,14 +2,15 @@ import crypto from 'crypto'
 import OpenAI from 'openai'
 import { OPENAI_API_KEY, OPENAI_MODEL } from './constants'
 
-// Languages we generate. The prose fields (description/subtitle/
-// long_description/category) are authored in Dutch, so they translate into
-// de/en (TARGET_LANGS). The spec/storage fields (FOREIGN_SOURCE_KEYS) were
-// authored in English, so translateAll also generates a Dutch rendering for
-// them | hence 'nl' is a valid target. The English DB value is never
-// overwritten; the storefront just reads i18n.nl for those fields.
+// Languages we generate. All three are real targets: the source text in the DB
+// is NOT reliably Dutch. The five spec/storage fields (FOREIGN_SOURCE_KEYS) are
+// English by construction, and the prose fields (description/subtitle/
+// long_description/category) are English for most of the live catalogue, so
+// 'nl' has to be generated for them too or a Dutch visitor reads English.
+// The DB source value is never overwritten; the storefront reads
+// metadata.i18n.<locale> and falls back to the source.
 export type TargetLang = 'nl' | 'de' | 'en'
-export const TARGET_LANGS: TargetLang[] = ['de', 'en']
+export const TARGET_LANGS: TargetLang[] = ['nl', 'de', 'en']
 
 export interface TranslatableFields {
   description?: string | null
@@ -35,14 +36,27 @@ const FIELD_KEYS = [
   'handling_notes',
 ] as const
 
-// Spec/storage fields authored in English. translateAll generates Dutch for
-// these (in addition to de/en) so the Dutch storefront does not show English.
+// Fields DECLARED to be English-authored: they are filled from supplier spec
+// sheets and are never written in Dutch. They always get a Dutch rendering, no
+// detection involved, so this path cannot regress on a short value the
+// detector cannot read.
 const FOREIGN_SOURCE_KEYS = [
   'physical_state',
   'solubility',
   'shelf_life',
   'storage_temp',
   'handling_notes',
+] as const
+
+// The prose fields. These have no declared source language: the catalogue is
+// mixed (English for the products imported from the supplier copy, Dutch for
+// anything the operator writes by hand), so their source language is detected
+// per field. See dutchTargetFields.
+const PROSE_KEYS = [
+  'description',
+  'subtitle',
+  'long_description',
+  'category',
 ] as const
 
 // Per-field character caps. A field over its cap is skipped (the storefront
@@ -70,6 +84,111 @@ const LANG_LABEL: Record<TargetLang, string> = {
   en: 'English',
 }
 
+// ---------------------------------------------------------------------------
+// Source-language detection
+// ---------------------------------------------------------------------------
+// Used for one decision only: does this field still need a Dutch rendering, or
+// is it already Dutch? Re-translating Dutch into Dutch burns tokens and lets
+// the model rewrite copy the operator wrote on purpose.
+//
+// Deliberately a stopword count, not a library: it must be free, synchronous
+// and deterministic (the alternative is an extra LLM round trip per field).
+
+export type SourceLang = 'nl' | 'en' | 'unknown'
+
+// Function words that are frequent in one language and are NOT a word in the
+// other. Shared spellings ("in", "is", "of", "was", "over", "we", "die", "as",
+// "per", "want", "na") are excluded on purpose, so a single ambiguous token can
+// never flip the verdict.
+const DUTCH_MARKERS = new Set([
+  'de', 'het', 'een', 'en', 'van', 'voor', 'met', 'wordt', 'worden', 'zijn',
+  'niet', 'bij', 'om', 'aan', 'door', 'ook', 'deze', 'dit', 'naar', 'tot',
+  'uit', 'op', 'als', 'maar', 'meer', 'kan', 'kunnen', 'moet', 'wij', 'onze',
+  'ons', 'hun', 'zoals', 'tussen', 'tijdens', 'gebruikt', 'gebruik', 'bewaren',
+  'onderzoek', 'wetenschappelijk', 'kwaliteit', 'zuiverheid', 'alleen',
+  'geleverd', 'hebben', 'heeft', 'bevat', 'hoge', 'elke', 'andere', 'veel',
+  'geen', 'nog', 'dus', 'omdat', 'indien', 'vanaf', 'binnen', 'buiten',
+  'onder', 'boven', 'zeer', 'zowel', 'echter', 'daarom', 'hierdoor',
+])
+
+const ENGLISH_MARKERS = new Set([
+  'a', 'an', 'the', 'and', 'for', 'with', 'this', 'that', 'these', 'those',
+  'are', 'were', 'from', 'to', 'at', 'by', 'or', 'has', 'have', 'its', 'it',
+  'our', 'you', 'your', 'they', 'their', 'which', 'when', 'where', 'while',
+  'should', 'must', 'can', 'used', 'using', 'stored', 'storage', 'purity',
+  'research', 'only', 'not', 'also', 'between', 'during', 'each', 'other',
+  'more', 'than', 'into', 'within', 'such', 'there', 'been', 'being', 'after',
+  'before', 'both', 'about', 'under', 'above', 'however', 'therefore',
+])
+
+// Below this many recognised markers the text is too short to judge (a
+// subtitle like "5mg vial", a category like "Peptides").
+const MIN_MARKERS = 2
+
+function words(text: string): string[] {
+  return text
+    // long_description is HTML: drop tags and attributes before counting, or
+    // "div", "class" and friends would be scored as prose.
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&[a-z]+;|&#\d+;/gi, ' ')
+    .toLowerCase()
+    .split(/[^a-zàâäçéèêëîïôöùûüÿñæœßáíóúãõ]+/i)
+    .filter(Boolean)
+}
+
+/**
+ * Best-effort guess at the language a field was authored in.
+ * Returns 'unknown' whenever the evidence is thin, and callers must treat
+ * 'unknown' as "translate it" | a redundant translation costs tokens, a missed
+ * one shows English to a Dutch buyer.
+ */
+export function detectSourceLang(text: string | null | undefined): SourceLang {
+  if (typeof text !== 'string' || !text.trim()) return 'unknown'
+
+  let nl = 0
+  let en = 0
+  for (const word of words(text)) {
+    if (DUTCH_MARKERS.has(word)) nl++
+    else if (ENGLISH_MARKERS.has(word)) en++
+  }
+
+  if (nl >= MIN_MARKERS && nl > en) return 'nl'
+  if (en >= MIN_MARKERS && en > nl) return 'en'
+  return 'unknown'
+}
+
+/**
+ * The subset of `source` that needs a Dutch rendering generated.
+ *
+ * Two explicit rules, in this order:
+ *  1. FOREIGN_SOURCE_KEYS (the five spec/storage fields) are DECLARED
+ *     English-authored and are always included. No detection, so this path
+ *     behaves exactly as it did before.
+ *  2. The prose fields are included unless they are detected as already Dutch.
+ *     Most of the live catalogue is English prose, so they normally are
+ *     included; a hand-written Dutch description is left alone and the
+ *     storefront falls back to the DB source for it.
+ *
+ * An operator who wants to force (or block) a field can still lock the
+ * translations with metadata.i18n_locked.
+ */
+export function dutchTargetFields(source: TranslatableFields): TranslatableFields {
+  const out: TranslatableFields = {}
+
+  for (const key of FOREIGN_SOURCE_KEYS) {
+    if (source[key] != null) out[key] = source[key]
+  }
+
+  for (const key of PROSE_KEYS) {
+    const value = source[key]
+    if (typeof value !== 'string' || !value.trim()) continue
+    if (detectSourceLang(value) === 'nl') continue
+    out[key] = value
+  }
+
+  return out
+}
+
 let client: OpenAI | null = null
 function getClient(): OpenAI | null {
   if (!OPENAI_API_KEY) return null
@@ -84,11 +203,25 @@ export function translationConfigured(): boolean {
   return Boolean(OPENAI_API_KEY)
 }
 
-// A stable hash of the Dutch source fields. The subscriber compares this against
-// the last-translated hash so it only re-translates when the source actually
-// changed (and so writing the translations back does not loop).
+/**
+ * Bump when the SHAPE of what we generate changes: a new target language, a
+ * new field, or a different source-language rule. It is part of the source
+ * hash, so every product's stored i18n_source_hash goes stale at once and the
+ * next save (or the admin "Vertaal nu" button) regenerates instead of handing
+ * back the cached translation. Nobody has to edit the product text to force it.
+ *
+ * v2 (2026-08-08): the Dutch pass now covers the prose fields, not just the
+ * five English-authored spec fields.
+ */
+export const TRANSLATION_SCHEMA_VERSION = 2
+
+// A stable hash of the source fields plus the generation schema version. The
+// subscriber compares this against the last-translated hash so it only
+// re-translates when the source (or the schema) actually changed, and so
+// writing the translations back does not loop.
 export function hashSource(source: TranslatableFields): string {
   const norm = JSON.stringify({
+    v: TRANSLATION_SCHEMA_VERSION,
     d: source.description ?? '',
     s: source.subtitle ?? '',
     l: source.long_description ?? '',
@@ -163,24 +296,22 @@ export async function translateFields(
 
 /**
  * Translate into every rendered language. Returns { nl, de, en }.
- * - de/en get every present field (prose is Dutch -> de/en; spec is English ->
- *   de/en).
- * - nl is generated ONLY for the English-authored spec fields
- *   (FOREIGN_SOURCE_KEYS); the prose fields are already Dutch in the DB, so the
- *   storefront falls back to the source for them on nl.
+ * - de/en get every present field, whatever language it was written in.
+ * - nl gets whatever `dutchTargetFields` says still needs Dutch: always the
+ *   five English-authored spec fields, plus every prose field that is not
+ *   already Dutch. A field left out simply falls back to the DB source on the
+ *   Dutch storefront, which is correct precisely because it is already Dutch.
+ *
+ * Three OpenAI calls per product, unchanged | the nl call now carries more
+ * fields rather than being an extra call.
  */
 export async function translateAll(
   source: TranslatableFields
 ): Promise<Record<TargetLang, TranslatableFields>> {
-  const foreignSource: TranslatableFields = {}
-  for (const key of FOREIGN_SOURCE_KEYS) {
-    if (source[key] != null) foreignSource[key] = source[key]
-  }
-
   const [de, en, nl] = await Promise.all([
     translateFields(source, 'de'),
     translateFields(source, 'en'),
-    translateFields(foreignSource, 'nl'),
+    translateFields(dutchTargetFields(source), 'nl'),
   ])
 
   return { nl, de, en }
