@@ -67,7 +67,17 @@ Railway. This `backend/` folder is the app; the git root is one level up at
 
 ## Tests
 - Jest (`npx jest <path>`). `tsc --noEmit` must stay clean.
-- Known pre-existing failures (fail on clean HEAD, not your change):
-  `minio-file/service.test.ts`, `subscribers/order-placed.test.ts`.
+- The suite is fully green (2026-08-08). The old "known pre-existing failures"
+  note naming `minio-file/service.test.ts` and `subscribers/order-placed.test.ts`
+  was stale; both pass. Treat any red as yours.
+- `email-notifications/__tests__/templates.test.tsx` is a genuine
+  load-sensitive flake (roughly 1 run in 4 under parallel load: "A component
+  suspended while responding to synchronous input" from `renderToStaticMarkup`).
+  Re-run it in isolation before concluding anything from it.
+- Mocks must model the real `query.graph` shapes or the test is worthless:
+  quantities live on `items.detail` and come back `undefined` on `items`,
+  relation arrays contain null elements, and `fulfillment_status` is not
+  computed. A mock returning one object for every call silently makes a
+  two-step lookup pass without ever running.
 - `medusa exec` against prod loads `**/*.ts` incl. test files (`jest is not
   defined`); rename test files out of the way when running exec scripts.
