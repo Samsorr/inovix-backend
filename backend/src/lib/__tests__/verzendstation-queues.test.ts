@@ -1,5 +1,6 @@
 import {
   buildVerzendstationQueues,
+  QUEUE_ORDER_FIELDS,
   selectStaleUnshipped,
   type QueueOrderRow,
 } from "../verzendstation-queues"
@@ -181,6 +182,76 @@ describe("buildVerzendstationQueues", () => {
     const q = buildVerzendstationQueues([canceledPlusShipped])
     expect(q.to_process).toHaveLength(0)
     expect(q.to_ship).toHaveLength(0)
+  })
+})
+
+describe("item_count across live query.graph quantity shapes", () => {
+  it("counts the detail quantity when items.quantity comes back undefined", () => {
+    // The live shape from commit bf77956: the selected items.quantity is
+    // undefined and the real number only exists on items.detail. Reading a
+    // single field made the warehouse queue say "0 items" for every order.
+    const q = buildVerzendstationQueues([
+      row({
+        items: [
+          { id: "item_1", quantity: undefined, detail: { quantity: 2 } },
+          { id: "item_2", quantity: undefined, detail: { raw_quantity: { value: "3", precision: 20 } } },
+        ],
+      }),
+    ])
+    expect(q.to_process[0].item_count).toBe(5)
+  })
+
+  it("requests every quantity shape in QUEUE_ORDER_FIELDS", () => {
+    expect(QUEUE_ORDER_FIELDS).toEqual(
+      expect.arrayContaining([
+        "items.quantity",
+        "items.raw_quantity",
+        "items.detail.quantity",
+        "items.detail.raw_quantity",
+      ])
+    )
+  })
+})
+
+describe("malformed live rows", () => {
+  // Live prod relation arrays contain null elements for some orders (commit
+  // 9d7e9fa). One such order used to throw a TypeError out of this pure
+  // function, which 500s the whole Verzendstation page and kills the daily
+  // unshipped alert for every other order too.
+  it("tolerates null elements in items, fulfillments, payment_collections and payments", () => {
+    const nulls = row({
+      id: "o_nulls",
+      items: [null as never, { id: "item_1", quantity: 2 }],
+      fulfillments: [null as never],
+      payment_collections: [
+        null as never,
+        { payments: [null as never, ...paidPayment().payments] },
+      ],
+    })
+    const q = buildVerzendstationQueues([nulls, row({ id: "o_ok" })])
+    expect(q.to_process.map((e) => e.id)).toEqual(["o_nulls", "o_ok"])
+    expect(q.to_process[0].item_count).toBe(2)
+  })
+
+  it("skips a row it cannot process and reports it instead of throwing", () => {
+    const exploding = {
+      id: "o_bad",
+      get status(): string {
+        throw new TypeError("Cannot read properties of null")
+      },
+    } as unknown as QueueOrderRow
+    const onSkip = jest.fn()
+
+    const q = buildVerzendstationQueues([exploding, row({ id: "o_ok" })], { onSkip })
+
+    expect(q.to_process.map((e) => e.id)).toEqual(["o_ok"])
+    expect(onSkip).toHaveBeenCalledTimes(1)
+    expect(onSkip.mock.calls[0][0]).toBe("o_bad")
+  })
+
+  it("skips a null row entirely", () => {
+    const q = buildVerzendstationQueues([null as never, row({ id: "o_ok" })])
+    expect(q.to_process.map((e) => e.id)).toEqual(["o_ok"])
   })
 })
 

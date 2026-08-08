@@ -509,13 +509,18 @@ const OrderFulfillmentChecklistWidget = ({
   const itemsTicked = allItemsTicked(itemIds, checklist)
   const missingWeight = productsMissingWeight(order)
 
+  // A canceled label invalidates the package-closed tick: the box was opened
+  // again for the redo, so the stored tick from the previous attempt must not
+  // show as confirmed (deriveStepStates applies the same rule).
+  const packageClosed = Boolean(checklist.package_closed) && (hasLabel || shipped)
+
   const steps = deriveStepStates({
     paymentOk: gate.ok,
     paymentOverridden,
     itemsTicked,
     itemsOverridden,
     hasLabel,
-    packageClosed: Boolean(checklist.package_closed),
+    packageClosed,
     shipped,
   })
 
@@ -730,13 +735,13 @@ const OrderFulfillmentChecklistWidget = ({
         <StepRow n={4} id="close" state={steps.close}>
           <label className="flex items-center gap-3" style={{ cursor: "pointer" }}>
             <Checkbox
-              checked={Boolean(checklist.package_closed) || shipped}
+              checked={packageClosed || shipped}
               disabled={steps.close === "locked" || shipped || busyAction}
               onCheckedChange={(v) => void setPackageClosed(v === true)}
             />
             <Text size="small">
               Het label is geprint, zit op het pakket en het pakket is dicht.
-              {checklist.package_closed
+              {packageClosed && checklist.package_closed
                 ? ` | bevestigd door ${checklist.package_closed.by_name}`
                 : ""}
             </Text>

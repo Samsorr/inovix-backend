@@ -60,6 +60,42 @@ describe("selectAutoShipCandidates", () => {
     ).toEqual([])
   })
 
+  it("tolerates null elements in the fulfillments array", () => {
+    // Live prod relation arrays contain null entries for some orders (commit
+    // 9d7e9fa). One such order threw a TypeError before the per-candidate
+    // try/catch, killing the whole 30-minute tracking-email cron.
+    const withNull = row({
+      id: "o_nulls",
+      fulfillments: [null as never, row({}).fulfillments![0]],
+    })
+    expect(selectAutoShipCandidates([withNull, row({ id: "o_ok" })]).map((c) => c.order_id)).toEqual([
+      "o_nulls",
+      "o_ok",
+    ])
+  })
+
+  it("skips a row it cannot read and reports it instead of throwing", () => {
+    const exploding = {
+      id: "o_bad",
+      get status(): string {
+        throw new TypeError("Cannot read properties of null")
+      },
+    } as unknown as AutoShipOrderRow
+    const onSkip = jest.fn()
+
+    const out = selectAutoShipCandidates([exploding, row({ id: "o_ok" })], { onSkip })
+
+    expect(out.map((c) => c.order_id)).toEqual(["o_ok"])
+    expect(onSkip).toHaveBeenCalledTimes(1)
+    expect(onSkip.mock.calls[0][0]).toBe("o_bad")
+  })
+
+  it("skips a null row entirely", () => {
+    expect(
+      selectAutoShipCandidates([null as never, row({ id: "o_ok" })]).map((c) => c.order_id)
+    ).toEqual(["o_ok"])
+  })
+
   it("prefers the unshipped fulfillment when a shipped redo pair exists", () => {
     const pair = row({
       id: "o8",

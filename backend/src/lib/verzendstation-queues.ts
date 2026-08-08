@@ -10,7 +10,12 @@ import {
   hasOverride,
   parseChecklist,
 } from "../admin/widgets/order-fulfillment-checklist.logic"
-import { normalizeBrokerPayment, toAmount } from "../admin/widgets/order-payment-broker.logic"
+import { normalizeBrokerPayment } from "../admin/widgets/order-payment-broker.logic"
+import {
+  itemQuantity,
+  ITEM_QUANTITY_FIELDS,
+  type ItemQuantityShape,
+} from "./item-quantity"
 
 const BROKER_PROVIDER_ID = "pp_via_broker_via_broker"
 
@@ -26,7 +31,9 @@ export const QUEUE_ORDER_FIELDS = [
   "shipping_address.first_name",
   "shipping_address.last_name",
   "items.id",
-  "items.quantity",
+  // items.quantity alone comes back undefined on live data (the value sits on
+  // items.detail); all four shapes are resolved by itemQuantity.
+  ...ITEM_QUANTITY_FIELDS,
   "fulfillments.id",
   "fulfillments.packed_at",
   "fulfillments.shipped_at",
@@ -53,13 +60,15 @@ export type QueueOrderRow = {
     first_name?: string | null
     last_name?: string | null
   } | null
-  items?: Array<{ id: string; quantity?: unknown }> | null
+  // Every relation array can contain null elements on live data (commit
+  // 9d7e9fa), hence the `| null` on the element types.
+  items?: Array<(ItemQuantityShape & { id: string }) | null> | null
   fulfillments?: Array<{
     id: string
     packed_at?: string | Date | null
     shipped_at?: string | Date | null
     canceled_at?: string | Date | null
-  }> | null
+  } | null> | null
   payment_collections?: Array<{
     payments?: Array<{
       provider_id?: string | null
@@ -68,8 +77,8 @@ export type QueueOrderRow = {
       canceled_at?: string | Date | null
       captures?: Array<{ amount?: unknown }> | null
       refunds?: Array<{ amount?: unknown }> | null
-    }> | null
-  }> | null
+    } | null> | null
+  } | null> | null
 }
 
 export type QueueEntry = {
@@ -100,49 +109,74 @@ function toEntry(row: QueueOrderRow, packedAt: string | null): QueueEntry {
     display_id: row.display_id ?? null,
     customer_name:
       `${a.first_name ?? ""} ${a.last_name ?? ""}`.trim() || (row.email ?? ""),
-    item_count: (row.items ?? []).reduce((n, i) => n + toAmount(i.quantity as never), 0),
+    item_count: (row.items ?? [])
+      .filter(Boolean)
+      .reduce((n, i) => n + (itemQuantity(i) ?? 0), 0),
     created_at: iso(row.created_at),
     packed_at: packedAt,
     customer_note: customerNoteFromOrder(row),
   }
 }
 
-export function buildVerzendstationQueues(rows: QueueOrderRow[]): VerzendstationQueues {
+export type BuildQueuesOptions = {
+  /**
+   * Called with the order id (and the error) for a row this function could not
+   * process. Callers pass a logger so a malformed order is identifiable
+   * instead of silently vanishing.
+   */
+  onSkip?: (orderId: string, err: unknown) => void
+}
+
+export function buildVerzendstationQueues(
+  rows: QueueOrderRow[],
+  opts: BuildQueuesOptions = {}
+): VerzendstationQueues {
   const to_process: QueueEntry[] = []
   const to_ship: QueueEntry[] = []
 
-  for (const row of rows) {
-    if (row.status === "canceled" || row.status === "draft" || row.status === "archived") {
-      continue
-    }
-    // Prefer a non-canceled fulfillment that still needs action (not shipped);
-    // an order with a shipped fulfillment AND a fresh redo must not be hidden
-    // behind the shipped one.
-    const nonCanceled = (row.fulfillments ?? []).filter((f) => !f.canceled_at)
-    const active = nonCanceled.find((f) => !f.shipped_at) ?? nonCanceled[0]
-    if (active?.shipped_at) continue
+  for (const row of rows ?? []) {
+    // One malformed order must never take out the whole page: this function
+    // feeds the Verzendstation queue AND the daily unshipped-orders alert, so
+    // a throw here would hide every other order too.
+    try {
+      if (!row) continue
+      if (row.status === "canceled" || row.status === "draft" || row.status === "archived") {
+        continue
+      }
+      // Prefer a non-canceled fulfillment that still needs action (not shipped);
+      // an order with a shipped fulfillment AND a fresh redo must not be hidden
+      // behind the shipped one. Live relation arrays can hold null elements
+      // (commit 9d7e9fa), so filter before touching any element.
+      const nonCanceled = (row.fulfillments ?? []).filter((f) => !!f && !f.canceled_at)
+      const active = nonCanceled.find((f) => !f!.shipped_at) ?? nonCanceled[0]
+      if (active?.shipped_at) continue
 
-    // Evaluated once per row: a refund after packing must pull the order out
-    // of the ship queue (spec edge case), while a logged payment override
-    // (e.g. a manual bank transfer) keeps legitimately-overridden orders
-    // visible even though the broker payment itself never went "ok".
-    const payment = (row.payment_collections ?? [])
-      .flatMap((c) => c.payments ?? [])
-      .find((p) => p?.provider_id === BROKER_PROVIDER_ID)
-    const paymentOk =
-      evaluatePaymentGate(
-        payment ? normalizeBrokerPayment(payment as never) : null
-      ).ok || hasOverride(parseChecklist(row.metadata), "payment")
+      // Evaluated once per row: a refund after packing must pull the order out
+      // of the ship queue (spec edge case), while a logged payment override
+      // (e.g. a manual bank transfer) keeps legitimately-overridden orders
+      // visible even though the broker payment itself never went "ok".
+      const payment = (row.payment_collections ?? [])
+        .filter(Boolean)
+        .flatMap((c) => c!.payments ?? [])
+        .filter(Boolean)
+        .find((p) => p!.provider_id === BROKER_PROVIDER_ID)
+      const paymentOk =
+        evaluatePaymentGate(
+          payment ? normalizeBrokerPayment(payment as never) : null
+        ).ok || hasOverride(parseChecklist(row.metadata), "payment")
 
-    if (active?.packed_at) {
+      if (active?.packed_at) {
+        if (!paymentOk) continue
+        to_ship.push(toEntry(row, iso(active.packed_at)))
+        continue
+      }
+      if (active) continue // fulfillment exists but not packed yet: mid-flight, skip
+
       if (!paymentOk) continue
-      to_ship.push(toEntry(row, iso(active.packed_at)))
-      continue
+      to_process.push(toEntry(row, null))
+    } catch (err) {
+      opts.onSkip?.(String((row as { id?: unknown } | null)?.id ?? "unknown"), err)
     }
-    if (active) continue // fulfillment exists but not packed yet: mid-flight, skip
-
-    if (!paymentOk) continue
-    to_process.push(toEntry(row, null))
   }
 
   // Oldest first: the longest-waiting order is the most urgent.

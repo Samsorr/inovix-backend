@@ -239,6 +239,26 @@ describe("deriveStepStates", () => {
     expect(shipped.ship).toBe("done")
     expect(shipped.close).toBe("done")
   })
+  it("a canceled label un-ticks the package-closed step", () => {
+    // The operator cancels a wrong label and opens the box again. The stored
+    // package_closed tick belongs to a package that no longer exists, so step 4
+    // must not stay green (and step 5 must not be offered).
+    const s = deriveStepStates({
+      ...base,
+      paymentOk: true,
+      itemsTicked: true,
+      hasLabel: false,
+      packageClosed: true,
+    })
+    expect(s.label).toBe("active")
+    expect(s.close).toBe("locked")
+    expect(s.ship).toBe("locked")
+  })
+  it("keeps close done for a shipped order even without an active label", () => {
+    const s = deriveStepStates({ ...base, packageClosed: true, shipped: true })
+    expect(s.close).toBe("done")
+    expect(s.ship).toBe("done")
+  })
   it("refund after packing re-locks close and ship", () => {
     const s = deriveStepStates({
       ...base,

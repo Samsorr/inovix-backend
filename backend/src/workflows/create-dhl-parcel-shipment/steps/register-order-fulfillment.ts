@@ -1,6 +1,8 @@
 import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 
+import { asQty } from "../../../lib/item-quantity"
+
 export type RegisterOrderFulfillmentInput = {
   order_id: string
   fulfillment_id: string
@@ -59,21 +61,46 @@ const registerOrderFulfillment = createStep(
         fields: ["id", "inventory_item_id", "location_id", "quantity"],
         filters: { line_item_id: input.items.map((i) => i.id) },
       })
-      const rs = (reservations ?? []) as Array<{
+      const rs = ((reservations ?? []) as Array<{
         id: string
         inventory_item_id: string
         location_id: string
-        quantity: number
-      }>
-      if (rs.length > 0) {
+        quantity: unknown
+      } | null>).filter(Boolean)
+
+      // reservation.quantity is a bigNumber column: query.graph can serve it as
+      // a raw { value, precision } object, and -Number(that) is -NaN. Resolve
+      // it, and leave a reservation whose quantity cannot be read completely
+      // alone (adjusting and deleting must always move together, or `available`
+      // drifts) rather than writing garbage into inventory.
+      const usable: Array<{ id: string; inventory_item_id: string; location_id: string; quantity: number }> = []
+      for (const r of rs) {
+        const quantity = asQty(r!.quantity)
+        if (quantity == null) {
+          const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
+          logger.error(
+            `[dhl-parcel] reservation ${r!.id} has an unreadable quantity ` +
+              `(order ${input.order_id}); left untouched, stock may need manual correction`
+          )
+          continue
+        }
+        usable.push({
+          id: r!.id,
+          inventory_item_id: r!.inventory_item_id,
+          location_id: r!.location_id,
+          quantity,
+        })
+      }
+
+      if (usable.length > 0) {
         await inventoryService.adjustInventory(
-          rs.map((r) => ({
+          usable.map((r) => ({
             inventoryItemId: r.inventory_item_id,
             locationId: r.location_id,
-            adjustment: -Number(r.quantity),
+            adjustment: -r.quantity,
           }))
         )
-        await inventoryService.deleteReservationItems(rs.map((r) => r.id))
+        await inventoryService.deleteReservationItems(usable.map((r) => r.id))
       }
     } catch (err) {
       const logger = container.resolve(ContainerRegistrationKeys.LOGGER)

@@ -42,17 +42,19 @@ type LoggerLike = {
 }
 
 // Find the active DHL fulfillment with a tracking number on a loaded order.
+// Live query.graph relation arrays can contain null elements (commit 9d7e9fa),
+// on both fulfillments and labels, so every element is filtered before use.
 export function findShippableDhlFulfillment(order: {
-  fulfillments?: Array<Record<string, any>> | null
+  fulfillments?: Array<Record<string, any> | null> | null
 }): Record<string, any> | null {
-  const fulfillments = (order.fulfillments ?? []) as any[]
+  const fulfillments = ((order.fulfillments ?? []) as any[]).filter(Boolean)
   return (
     fulfillments.find((f: any) => {
       if (f.canceled_at) return false
       const trackingFromData = typeof f.data?.dhl_tracking_number === "string"
-      const trackingFromLabel = (f.labels ?? []).some(
-        (l: any) => l.tracking_number != null && l.tracking_number !== ""
-      )
+      const trackingFromLabel = ((f.labels ?? []) as any[])
+        .filter(Boolean)
+        .some((l: any) => l.tracking_number != null && l.tracking_number !== "")
       const isDhl = f.provider_id === "dhl-parcel_dhl-parcel" || trackingFromData
       return isDhl && (trackingFromData || trackingFromLabel)
     }) ?? null
@@ -92,6 +94,7 @@ export async function markDhlOrderShipped(
         shipped_at: new Date(),
       })
       const shipItems = ((order.items ?? []) as any[])
+        .filter(Boolean)
         .map((i: any) => ({
           id: i.id,
           // Raw query.graph serves these as BigNumber objects; Number() would

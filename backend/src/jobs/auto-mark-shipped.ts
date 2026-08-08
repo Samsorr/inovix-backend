@@ -33,6 +33,7 @@ export type AutoShipOrderRow = {
   id: string
   status?: string | null
   shipping_address?: { postal_code?: string | null } | null
+  // Live relation arrays can contain null elements (commit 9d7e9fa).
   fulfillments?: Array<{
     id: string
     provider_id?: string | null
@@ -40,7 +41,7 @@ export type AutoShipOrderRow = {
     shipped_at?: string | Date | null
     canceled_at?: string | Date | null
     data?: Record<string, unknown> | null
-  }> | null
+  } | null> | null
 }
 
 export type AutoShipCandidate = {
@@ -49,29 +50,45 @@ export type AutoShipCandidate = {
   postal_code: string | null
 }
 
+export type SelectAutoShipOptions = {
+  /** Called with the order id (and the error) for a row that could not be read. */
+  onSkip?: (orderId: string, err: unknown) => void
+}
+
 // Pure selection, exported for tests: packed + unshipped + non-canceled DHL
 // fulfillment with a tracking number, on a non-canceled order.
-export function selectAutoShipCandidates(rows: AutoShipOrderRow[]): AutoShipCandidate[] {
+export function selectAutoShipCandidates(
+  rows: AutoShipOrderRow[],
+  opts: SelectAutoShipOptions = {}
+): AutoShipCandidate[] {
   const out: AutoShipCandidate[] = []
-  for (const row of rows) {
-    if (row.status === "canceled" || row.status === "draft" || row.status === "archived") {
-      continue
+  for (const row of rows ?? []) {
+    // This runs OUTSIDE the per-candidate try/catch below, so one malformed
+    // order used to kill the whole tracking-email cron.
+    try {
+      if (!row) continue
+      if (row.status === "canceled" || row.status === "draft" || row.status === "archived") {
+        continue
+      }
+      // Live relation arrays can hold null elements; filter before reading.
+      const active = (row.fulfillments ?? []).filter(Boolean).find(
+        (f) =>
+          !f!.canceled_at &&
+          !f!.shipped_at &&
+          f!.packed_at &&
+          (f!.provider_id === "dhl-parcel_dhl-parcel" ||
+            typeof f!.data?.dhl_tracking_number === "string")
+      )
+      const tracking = active?.data?.dhl_tracking_number
+      if (!active || typeof tracking !== "string" || !tracking) continue
+      out.push({
+        order_id: row.id,
+        tracking_number: tracking,
+        postal_code: row.shipping_address?.postal_code ?? null,
+      })
+    } catch (err) {
+      opts.onSkip?.(String((row as { id?: unknown } | null)?.id ?? "unknown"), err)
     }
-    const active = (row.fulfillments ?? []).find(
-      (f) =>
-        !f.canceled_at &&
-        !f.shipped_at &&
-        f.packed_at &&
-        (f.provider_id === "dhl-parcel_dhl-parcel" ||
-          typeof f.data?.dhl_tracking_number === "string")
-    )
-    const tracking = active?.data?.dhl_tracking_number
-    if (!active || typeof tracking !== "string" || !tracking) continue
-    out.push({
-      order_id: row.id,
-      tracking_number: tracking,
-      postal_code: row.shipping_address?.postal_code ?? null,
-    })
   }
   return out
 }
@@ -89,10 +106,12 @@ export default async function autoMarkShipped(container: MedusaContainer) {
     pagination: { take: 300, skip: 0, order: { created_at: "DESC" } },
   })
 
-  const candidates = selectAutoShipCandidates((data ?? []) as AutoShipOrderRow[]).slice(
-    0,
-    MAX_LOOKUPS_PER_TICK
-  )
+  const candidates = selectAutoShipCandidates((data ?? []) as AutoShipOrderRow[], {
+    onSkip: (orderId, err) =>
+      logger.warn(
+        `[auto-mark-shipped] skipped unreadable order ${orderId}: ${(err as Error)?.message}`
+      ),
+  }).slice(0, MAX_LOOKUPS_PER_TICK)
   if (candidates.length === 0) {
     return
   }

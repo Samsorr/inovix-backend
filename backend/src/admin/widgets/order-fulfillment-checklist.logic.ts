@@ -197,6 +197,9 @@ export type StepState = "done" | "active" | "locked" | "blocked"
 // because the payment gate re-evaluates live: a refund arriving after the
 // package was already labeled must flip step 1 back to "blocked" and
 // re-lock steps 4-5 (close, ship) so the order can't be shipped out unpaid.
+// The package-closed tick likewise only counts while an active label exists:
+// cancelling a label means the box was opened again, so a stale tick from the
+// previous attempt must not keep step 4 green.
 export function deriveStepStates(input: {
   paymentOk: boolean
   paymentOverridden: boolean
@@ -211,7 +214,7 @@ export function deriveStepStates(input: {
   const pickDone =
     input.itemsTicked || input.itemsOverridden || input.hasLabel || input.shipped
   const labelDone = input.hasLabel || input.shipped
-  const closeDone = input.packageClosed || input.shipped
+  const closeDone = (input.packageClosed && labelDone) || input.shipped
   const shipDone = input.shipped
   return {
     payment: paymentDone ? "done" : "blocked",

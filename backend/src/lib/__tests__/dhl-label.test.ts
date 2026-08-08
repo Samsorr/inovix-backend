@@ -128,6 +128,52 @@ describe('createDhlLabelForOrder', () => {
     expect(kb).toContain('det:28412')
   })
 
+  it('clears a stale package_closed tick when a label is redone after a cancel', async () => {
+    // The previous label was canceled, so the box was opened again. The old
+    // "pakket dicht" tick must not carry over to the new label, or step 4 shows
+    // green for a package that no longer exists.
+    const order = {
+      ...baseOrder,
+      metadata: {
+        fulfillment_checklist: {
+          version: 1,
+          items: { item_1: { at: '2026-07-15T10:00:00Z', by_id: 'u1', by_name: 'Sam' } },
+          package_closed: { at: '2026-07-15T10:05:00Z', by_id: 'u1', by_name: 'Sam' },
+          overrides: [],
+        },
+      },
+      fulfillments: [
+        { id: 'ful_old', provider_id: 'dhl-parcel_dhl-parcel', canceled_at: '2026-07-15T11:00:00Z',
+          data: { dhl_tracking_number: '3S0' }, labels: [{ tracking_number: '3S0' }] },
+      ],
+    }
+    const run = jest.fn().mockResolvedValue({ result: {
+      fulfillment_id: 'ful_4', fulfillment: { data: { dhl_tracking_number: '3S4' } },
+    } })
+    ;(createDhlParcelShipmentWorkflow as jest.Mock).mockReturnValue({ run })
+    const c = makeContainer(order)
+
+    const r = await createDhlLabelForOrder(c as never, 'ord_1')
+
+    expect(r).toMatchObject({ status: 'created', fulfillment_id: 'ful_4' })
+    expect(c.orderService.updateOrders).toHaveBeenCalledWith([expect.objectContaining({
+      id: 'ord_1',
+      metadata: expect.objectContaining({
+        fulfillment_checklist: expect.objectContaining({ package_closed: null }),
+      }),
+    })])
+  })
+
+  it('leaves the checklist alone on a first label attempt', async () => {
+    const run = jest.fn().mockResolvedValue({ result: {
+      fulfillment_id: 'ful_5', fulfillment: { data: { dhl_tracking_number: '3S5' } },
+    } })
+    ;(createDhlParcelShipmentWorkflow as jest.Mock).mockReturnValue({ run })
+    const c = makeContainer(baseOrder)
+    await createDhlLabelForOrder(c as never, 'ord_1')
+    expect(c.orderService.updateOrders).not.toHaveBeenCalled()
+  })
+
   it('maps a workflow MedusaError to invalid with an http status', async () => {
     const medusaErr = Object.assign(new Error('De betaling is nog niet (volledig) ontvangen'), {
       __isMedusaError: true, type: 'not_allowed',
