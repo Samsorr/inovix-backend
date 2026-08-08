@@ -64,6 +64,27 @@ describe('fetchInventoryRows', () => {
     expect(rows[0].name).toBe('Vial')
   })
 
+  it('carries manage_inventory through as managed, and only an explicit boolean', async () => {
+    const c = makeContainer(
+      [invItem('iitem_on', 'Vial'), invItem('iitem_off', 'Vial'), invItem('iitem_missing', 'Vial'), invItem('iitem_unlinked', 'Vial')],
+      [
+        { ...variant('iitem_on', 'Managed', '10mg'), manage_inventory: true },
+        { ...variant('iitem_off', 'Unmanaged', '10mg'), manage_inventory: false },
+        // Field absent: query.graph returns undefined for an unknown field
+        // name without erroring, so it must NOT read as "unmanaged".
+        variant('iitem_missing', 'NoFlag', '10mg'),
+      ]
+    )
+    const rows = await fetchInventoryRows(c as never)
+    const managed = Object.fromEntries(rows.map((r) => [r.id, r.managed]))
+    expect(managed).toEqual({
+      iitem_on: true,
+      iitem_off: false,
+      iitem_missing: null,
+      iitem_unlinked: null,
+    })
+  })
+
   it('skips the default-variant title suffix ("Default variant")', () => {
     expect(inventoryDisplayName({ product: { title: 'BPC-157' }, title: 'Default variant', sku: null } as never, 'Vial')).toBe('BPC-157')
     expect(inventoryDisplayName({ product: { title: 'BPC-157' }, title: '10mg', sku: null } as never, 'Vial')).toBe('BPC-157 10mg')

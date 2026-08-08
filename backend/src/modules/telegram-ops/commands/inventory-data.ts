@@ -14,12 +14,28 @@ export type InventoryRow = {
   reserved: number
   available: number
   locationId: string | null
+  /**
+   * The linked variant's manage_inventory flag.
+   *
+   * `false` means Medusa drops this variant from every stock gate it has, so
+   * these numbers NEVER move no matter what sells: no reservation on cart
+   * completion, no decrement on fulfillment. Any consumer reasoning about
+   * movement (thresholds, out-of-stock) must treat that as "not measurable
+   * here", not as a stock level.
+   *
+   * `null` means unknown: no variant link (13 legacy inventory items have
+   * none) or the variant lookup failed. Deliberately distinct from `false` so
+   * a failing lookup degrades to the old, noisier behaviour instead of
+   * silencing every alert at once.
+   */
+  managed: boolean | null
 }
 
 type VariantRow = {
   id: string
   title?: string | null
   sku?: string | null
+  manage_inventory?: boolean | null
   product?: { title?: string | null } | null
   // The link exposes the related inventory item as `inventory`; its id is
   // the ONLY verified graph path (inventory_items.inventory.id, same as
@@ -48,7 +64,7 @@ async function variantByInventoryItem(container: MedusaContainer): Promise<Map<s
   try {
     const { data } = await query.graph({
       entity: 'product_variant',
-      fields: ['id', 'title', 'sku', 'product.title', 'inventory_items.inventory.id'],
+      fields: ['id', 'title', 'sku', 'manage_inventory', 'product.title', 'inventory_items.inventory.id'],
     })
     for (const v of (data ?? []) as Array<VariantRow | null>) {
       if (!v) continue
@@ -82,13 +98,18 @@ export async function fetchInventoryRows(container: MedusaContainer): Promise<In
       // skus name the product ("KPV-Vial-10MG"). Matters for the 13 legacy
       // inventory items that have no variant link at all.
       const fallback = String(i!.sku || i!.title || i!.id)
+      const variant = names.get(String(i!.id))
       return {
         id: String(i!.id),
-        name: inventoryDisplayName(names.get(String(i!.id)), fallback),
+        name: inventoryDisplayName(variant, fallback),
         stocked,
         reserved,
         available: stocked - reserved,
         locationId: (i!.location_levels ?? [])[0]?.location_id ?? null,
+        // Only an EXPLICIT boolean counts. An unknown field name returns
+        // undefined silently through query.graph, and treating that as false
+        // would silence every stock alert at once.
+        managed: typeof variant?.manage_inventory === 'boolean' ? variant.manage_inventory : null,
       }
     })
 }
