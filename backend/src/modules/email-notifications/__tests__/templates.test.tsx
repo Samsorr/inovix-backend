@@ -37,6 +37,7 @@ import ReactDOMServer from 'react-dom/server'
 import { generateEmailTemplate } from '../templates'
 import { isInviteUserData } from '../templates/invite-user'
 import { isOrderPlacedTemplateData } from '../templates/order-placed'
+import { isOrderShippedTemplateData } from '../templates/order-shipped'
 
 // The first render of a react-email tree can suspend once (Tailwind warms an
 // internal cache), which under parallel load shows up as "A component
@@ -339,5 +340,154 @@ describe('order-placed with the data shapes production actually produces', () =>
       })
     )
     expect(html).not.toContain('NaN')
+  })
+})
+
+// The operator may reword an order email before sending it. The edited copy
+// rides inside the notification data as a flat `overrides` object, and the
+// template resolves every editable string as `overrides[key] ?? i18n[key]`.
+// The greeting, the items table, the address block and the footer stay locked.
+describe('editable overrides', () => {
+  const shippedProps = {
+    order: {
+      id: 'order_1',
+      display_id: '28416',
+      email: 'klant@example.com',
+      currency_code: 'eur',
+    },
+    shippingAddress: {
+      first_name: 'Sarah',
+      last_name: 'Lenze',
+      address_1: 'Schmerwitz 45C',
+      city: 'Wiesenburg',
+      postal_code: '14827',
+      country_code: 'de',
+    },
+    labels: [
+      {
+        tracking_number: 'JVGL123',
+        tracking_url: 'https://my.dhlecommerce.nl/x',
+        label_url: null,
+      },
+    ],
+    items: [{ id: 'i1', title: 'GHK-Cu', quantity: 1 }],
+    locale: 'nl' as const,
+  }
+
+  const placedProps = {
+    order: {
+      id: 'order_1',
+      display_id: '28416',
+      created_at: new Date().toISOString(),
+      currency_code: 'eur',
+      summary: { raw_current_order_total: { value: 100 } },
+    },
+    shippingAddress: shippedProps.shippingAddress,
+    locale: 'nl' as const,
+  }
+
+  function renderShipped(extra: Record<string, unknown> = {}): string {
+    const node = generateEmailTemplate('order-shipped', { ...shippedProps, ...extra })
+    return ReactDOMServer.renderToStaticMarkup(node as React.ReactElement)
+  }
+
+  function renderPlaced(extra: Record<string, unknown> = {}): string {
+    const node = generateEmailTemplate('order-placed', { ...placedProps, ...extra })
+    return ReactDOMServer.renderToStaticMarkup(node as React.ReactElement)
+  }
+
+  it('order-shipped renders the standard text when there are no overrides', () => {
+    const html = renderShipped()
+    expect(html).toContain('Uw pakket is zojuist overgedragen aan de vervoerder')
+    expect(html).toContain('Volg uw pakket')
+  })
+
+  it('order-shipped renders overridden text, heading, button and tracking link', () => {
+    const html = renderShipped({
+      overrides: {
+        heading: 'Uw pakket is vandaag verstuurd',
+        body: 'Wij hebben uw pakket vanmiddag afgegeven bij DHL.',
+        trackingHeading: 'Volgen',
+        trackingBody: 'Klik hieronder.',
+        trackButton: 'Bekijk status',
+        trackingUrl: 'https://example.com/anders',
+      },
+    })
+    expect(html).toContain('Uw pakket is vandaag verstuurd')
+    expect(html).toContain('Wij hebben uw pakket vanmiddag afgegeven bij DHL.')
+    expect(html).toContain('Bekijk status')
+    expect(html).toContain('https://example.com/anders')
+    expect(html).not.toContain('Uw pakket is zojuist overgedragen aan de vervoerder')
+    expect(html).not.toContain('Volg uw pakket')
+  })
+
+  it('order-shipped keeps the greeting and the locked blocks when overridden', () => {
+    const html = renderShipped({ overrides: { body: 'Eigen tekst' } })
+    expect(html).toContain('Beste')
+    expect(html).toContain('Sarah')
+    expect(html).toContain('Inhoud van deze zending')
+    expect(html).toContain('Verzendadres')
+  })
+
+  it('order-shipped falls back per field: an empty override keeps the default', () => {
+    const html = renderShipped({
+      overrides: { body: '   ', trackButton: 'Bekijk status' },
+    })
+    expect(html).toContain('Uw pakket is zojuist overgedragen aan de vervoerder')
+    expect(html).toContain('Bekijk status')
+  })
+
+  it('order-placed renders overridden heading and body and keeps the greeting', () => {
+    const html = renderPlaced({
+      overrides: {
+        heading: 'Dank voor uw order',
+        body: 'Wij pakken uw bestelling morgen in.',
+      },
+    })
+    expect(html).toContain('Dank voor uw order')
+    expect(html).toContain('Wij pakken uw bestelling morgen in.')
+    expect(html).toContain('Beste')
+    expect(html).not.toContain('Bedankt voor uw bestelling')
+  })
+
+  it('order-placed renders the standard copy when there are no overrides', () => {
+    const html = renderPlaced()
+    expect(html).toContain('Bedankt voor uw bestelling')
+    expect(html).toContain('We hebben uw bestelling ontvangen')
+  })
+
+  it('the data guards accept payloads with and without overrides', () => {
+    expect(isOrderShippedTemplateData({ ...shippedProps })).toBe(true)
+    expect(
+      isOrderShippedTemplateData({ ...shippedProps, overrides: { body: 'x' } })
+    ).toBe(true)
+    expect(isOrderPlacedTemplateData({ ...placedProps })).toBe(true)
+    expect(
+      isOrderPlacedTemplateData({ ...placedProps, overrides: { body: 'x' } })
+    ).toBe(true)
+  })
+})
+
+// Regression: the composer offers the first label that HAS a url as the
+// default, so the template must override that same label. Targeting index 0
+// blindly would edit one parcel's link while showing another's.
+describe('order-shipped tracking url override targets the label the composer showed', () => {
+  it('overrides the first label carrying a url, not a numbers-only first label', () => {
+    const html = ReactDOMServer.renderToStaticMarkup(
+      generateEmailTemplate('order-shipped', {
+        order: { id: 'order_1', display_id: '28416', email: 'k@example.com', currency_code: 'eur' },
+        shippingAddress: { first_name: 'Sarah', last_name: 'Lenze', address_1: 'Schmerwitz 45C', city: 'Wiesenburg', postal_code: '14827', country_code: 'de' },
+        labels: [
+          { tracking_number: 'GEEN-URL', tracking_url: null, label_url: null },
+          { tracking_number: 'JVGL2', tracking_url: 'https://my.dhlecommerce.nl/tweede', label_url: null },
+        ],
+        items: [{ id: 'i1', title: 'GHK-Cu', quantity: 1 }],
+        locale: 'nl',
+        overrides: { trackingUrl: 'https://example.com/handmatig' },
+      }) as React.ReactElement
+    )
+
+    expect(html).toContain('https://example.com/handmatig')
+    expect(html).not.toContain('https://my.dhlecommerce.nl/tweede')
   })
 })

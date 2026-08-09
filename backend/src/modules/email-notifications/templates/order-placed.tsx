@@ -9,6 +9,7 @@ import {
   toEmailNumber,
   ORDER_PLACED_I18N,
 } from './email-i18n'
+import { resolveText } from './overrides'
 
 export const ORDER_PLACED = 'order-placed'
 
@@ -33,6 +34,12 @@ export interface OrderPlacedTemplateProps {
   shippingAddress: OrderAddressDTO
   locale?: EmailLocale
   preview?: string
+  /**
+   * Operator-edited copy, keyed by the i18n key it replaces. Only the fields
+   * in `editable-fields.ts` are ever present. Absent on every automatic send,
+   * which then renders exactly as it always did.
+   */
+  overrides?: Record<string, string>
 }
 
 // `typeof null === 'object'`, so the old guard happily accepted
@@ -47,7 +54,7 @@ export const isOrderPlacedTemplateData = (data: any): data is OrderPlacedTemplat
 
 export const OrderPlacedTemplate: React.FC<OrderPlacedTemplateProps> & {
   PreviewProps: OrderPlacedPreviewProps
-} = ({ order, shippingAddress, locale = 'nl', preview }) => {
+} = ({ order, shippingAddress, locale = 'nl', preview, overrides }) => {
   const t = ORDER_PLACED_I18N[locale] ?? ORDER_PLACED_I18N.nl
   const currency = order.currency_code
   const totalValue = order.summary?.raw_current_order_total?.value
@@ -56,7 +63,7 @@ export const OrderPlacedTemplate: React.FC<OrderPlacedTemplateProps> & {
     <Base preview={preview ?? t.preview} locale={locale}>
       <Section className="mt-[24px] text-center">
         <Text className="text-black text-[18px] font-semibold leading-[28px] m-0">
-          {t.heading}
+          {resolveText(overrides, 'heading', t.heading)}
         </Text>
         <Text className="text-[#666666] text-[12px] leading-[20px] mt-[4px] mb-0">
           {t.orderNumber} #{order.display_id} | {formatEmailDate(order.created_at, locale)}
@@ -68,7 +75,7 @@ export const OrderPlacedTemplate: React.FC<OrderPlacedTemplateProps> & {
           {t.greeting} {shippingAddress.first_name} {shippingAddress.last_name},
         </Text>
         <Text className="text-black text-[14px] leading-[22px] mt-[12px]">
-          {t.body}
+          {resolveText(overrides, 'body', t.body)}
         </Text>
       </Section>
 
