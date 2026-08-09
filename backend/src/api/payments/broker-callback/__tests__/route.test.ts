@@ -23,14 +23,24 @@ import { POST } from "../route"
 
 const mockLogger = { error: jest.fn(), warn: jest.fn(), info: jest.fn() }
 
+// The broker knows its own opaque ref (`pay_<hex>`), never Medusa's session id,
+// so the route has to translate. Default double: one live session carrying the
+// ref the fixtures below use.
+const SESSIONS = [
+  { id: "payses_other", data: { ref: "pay_zzz", cart_id: "cart_zzz" } },
+  { id: "payses_01ABC", data: { ref: "pay_abc", cart_id: "cart_abc" } },
+]
+
 function mockRequest(input: {
   webhookResult?: unknown
   webhookError?: Error
   workflowError?: Error
+  sessions?: Array<{ id: string; data?: Record<string, unknown> | null }>
 }) {
   const getWebhookActionAndData = input.webhookError
     ? jest.fn().mockRejectedValue(input.webhookError)
     : jest.fn().mockResolvedValue(input.webhookResult)
+  const listPaymentSessions = jest.fn().mockResolvedValue(input.sessions ?? SESSIONS)
   const run = input.workflowError
     ? jest.fn().mockRejectedValue(input.workflowError)
     : jest.fn().mockResolvedValue({})
@@ -41,13 +51,13 @@ function mockRequest(input: {
     scope: {
       resolve: jest.fn((key: string) => {
         if (key === "logger") return mockLogger
-        if (key === "paymentModule") return { getWebhookActionAndData }
+        if (key === "paymentModule") return { getWebhookActionAndData, listPaymentSessions }
         if (key === "workflowEngine") return { run }
         return undefined
       }),
     },
   } as unknown as MedusaRequest
-  return { req, getWebhookActionAndData, run }
+  return { req, getWebhookActionAndData, listPaymentSessions, run }
 }
 
 function mockResponse() {
@@ -64,23 +74,31 @@ function mockResponse() {
 describe("POST /payments/broker-callback", () => {
   beforeEach(() => jest.clearAllMocks())
 
-  test("captured action runs processPaymentWorkflow with the event", async () => {
+  // processPaymentWorkflow looks up `payment_session` BY ID and walks
+  // payment_collection -> cart to complete it. Handing it the broker ref made
+  // every lookup miss and threw "PaymentSession with id: pay_... was not found"
+  // (prod, order #28416, 2026-08-08), so the cron had to rescue the order.
+  test("captured action swaps the broker ref for the Medusa payment session id", async () => {
     const event = {
       action: "captured",
       data: { session_id: "pay_abc", amount: undefined },
     }
-    const { req, run } = mockRequest({ webhookResult: event })
+    const { req, run, listPaymentSessions } = mockRequest({ webhookResult: event })
     const res = mockResponse()
 
     await POST(req, res)
 
+    expect(listPaymentSessions).toHaveBeenCalledWith(
+      { provider_id: "pp_via_broker_via_broker" },
+      expect.objectContaining({ order: { created_at: "DESC" } })
+    )
     expect(run).toHaveBeenCalledWith("process-payment-workflow", {
-      input: event,
+      input: { action: "captured", data: { session_id: "payses_01ABC", amount: undefined } },
     })
     expect(res.status).toHaveBeenCalledWith(200)
   })
 
-  test("authorized action also runs the workflow", async () => {
+  test("authorized action also runs the workflow, with the mapped session id", async () => {
     const event = {
       action: "authorized",
       data: { session_id: "pay_abc", amount: undefined },
@@ -91,7 +109,36 @@ describe("POST /payments/broker-callback", () => {
     await POST(req, res)
 
     expect(run).toHaveBeenCalledTimes(1)
+    expect(run.mock.calls[0][1].input.data.session_id).toBe("payses_01ABC")
     expect(res.status).toHaveBeenCalledWith(200)
+  })
+
+  test("unknown ref is acknowledged without running the workflow (cron picks it up)", async () => {
+    const { req, run } = mockRequest({
+      webhookResult: { action: "captured", data: { session_id: "pay_gone" } },
+    })
+    const res = mockResponse()
+
+    await POST(req, res)
+
+    expect(run).not.toHaveBeenCalled()
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining("pay_gone"))
+    expect(res.status).toHaveBeenCalledWith(200)
+  })
+
+  test("sessions with no data do not break the ref lookup", async () => {
+    const { req, run } = mockRequest({
+      webhookResult: { action: "captured", data: { session_id: "pay_abc" } },
+      sessions: [
+        { id: "payses_null", data: null },
+        { id: "payses_01ABC", data: { ref: "pay_abc" } },
+      ],
+    })
+    const res = mockResponse()
+
+    await POST(req, res)
+
+    expect(run.mock.calls[0][1].input.data.session_id).toBe("payses_01ABC")
   })
 
   test.each(["failed", "canceled", "not_supported", "requires_more"])(
