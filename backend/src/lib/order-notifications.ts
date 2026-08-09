@@ -15,6 +15,13 @@ export type OrderEmail = {
   idempotency_key: string | null
   /** True when the operator rewrote copy before this mail went out. */
   edited: boolean
+  /**
+   * The copy this mail actually went out with, replayable through the preview
+   * endpoint. Null for an untouched send. Without it "bekijk verzonden tekst"
+   * could only show the standard template, which is precisely the mail the
+   * operator did NOT send.
+   */
+  sent_overrides: Record<string, string> | null
 }
 
 /**
@@ -35,6 +42,37 @@ export function isEditedNotificationData(data: unknown): boolean {
     return false
   }
   return Object.keys(overrides).length > 0
+}
+
+/**
+ * Rebuild the override set this notification was sent with, in the shape the
+ * preview endpoint accepts.
+ *
+ * The subject is folded back in because `applyOverrides` moved it out to
+ * `emailOptions` on the way in; feeding it back as `subject` makes the replay
+ * round-trip exactly. Only edited rows carry it, so an untouched mail replays
+ * as the plain template.
+ */
+export function sentOverridesFromData(
+  data: unknown
+): Record<string, string> | null {
+  if (!isEditedNotificationData(data)) return null
+  const record = data as Record<string, any>
+  const out: Record<string, string> = {}
+
+  const overrides = record.overrides
+  if (overrides && typeof overrides === "object" && !Array.isArray(overrides)) {
+    for (const [key, value] of Object.entries(overrides)) {
+      if (typeof value === "string") out[key] = value
+    }
+  }
+
+  const subject = record.emailOptions?.subject
+  if (typeof subject === "string" && subject.trim().length > 0) {
+    out.subject = subject
+  }
+
+  return Object.keys(out).length > 0 ? out : null
 }
 
 export async function listOrderEmails(
@@ -66,6 +104,7 @@ export async function listOrderEmails(
       created_at: n.created_at ?? null,
       idempotency_key: n.idempotency_key ?? null,
       edited: isEditedNotificationData(n.data),
+      sent_overrides: sentOverridesFromData(n.data),
     })),
   }
 }
@@ -85,6 +124,7 @@ export async function getNotification(
     created_at: n.created_at ?? null,
     idempotency_key: n.idempotency_key ?? null,
     edited: isEditedNotificationData(n.data),
+    sent_overrides: sentOverridesFromData(n.data),
   }
 }
 

@@ -8,6 +8,7 @@ import {
   listOrderEmails,
   resendOrderConfirmation,
   resendOrderEmail,
+  sentOverridesFromData,
 } from "../order-notifications"
 
 const ORDER_ID = "order_abc"
@@ -215,5 +216,35 @@ describe("listOrderEmails edited flag", () => {
     const single = await getNotification(container, "noti_edited")
 
     expect(single).toMatchObject({ id: "noti_edited", edited: true })
+  })
+})
+
+describe("sentOverridesFromData", () => {
+  it("returns null for an untouched send", () => {
+    expect(sentOverridesFromData({ emailOptions: { subject: "Standaard" } })).toBeNull()
+    expect(sentOverridesFromData(null)).toBeNull()
+    expect(sentOverridesFromData({ overrides: {} })).toBeNull()
+  })
+
+  it("replays the rewritten fields plus the subject it was sent with", () => {
+    expect(
+      sentOverridesFromData({
+        edited: true,
+        emailOptions: { subject: "Eigen onderwerp" },
+        overrides: { body: "Eigen tekst", trackButton: "Volg" },
+      })
+    ).toEqual({ body: "Eigen tekst", trackButton: "Volg", subject: "Eigen onderwerp" })
+  })
+
+  it("replays a subject-only edit, which never reaches the overrides object", () => {
+    expect(
+      sentOverridesFromData({ edited: true, emailOptions: { subject: "Alleen onderwerp" } })
+    ).toEqual({ subject: "Alleen onderwerp" })
+  })
+
+  it("ignores non-string override values", () => {
+    expect(
+      sentOverridesFromData({ edited: true, overrides: { body: "Tekst", bad: 42 } })
+    ).toEqual({ body: "Tekst" })
   })
 })

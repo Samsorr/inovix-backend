@@ -12,6 +12,7 @@ import {
 } from "@medusajs/ui"
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react"
 
+import { EmailComposer } from "../components/email-composer"
 import { customerNoteFromOrder } from "./customer-note.logic"
 import { decodeBase64DataUri } from "./order-dhl-parcel.logic"
 import {
@@ -863,9 +864,24 @@ const OrderFulfillmentChecklistWidget = ({
               <Text size="small" className="text-ui-fg-subtle">
                 Verzonden | de klant heeft de track-and-trace mail ontvangen.
               </Text>
-              <Button variant="secondary" size="small" onClick={() => setShipOpen(true)}>
-                Verzendmail opnieuw sturen
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="secondary" size="small" onClick={() => setShipOpen(true)}>
+                  Verzendmail opnieuw sturen
+                </Button>
+                {/* Same mail, but with the operator's own wording. It posts to
+                    the same send-email route, so the shipped state and the
+                    idempotency policy stay untouched. */}
+                <EmailComposer
+                  orderId={orderId}
+                  template="order-shipped"
+                  onSent={() => void loadAll()}
+                  trigger={
+                    <Button variant="secondary" size="small">
+                      Bewerken en versturen
+                    </Button>
+                  }
+                />
+              </div>
             </div>
           ) : (
             <div className="flex flex-col gap-2">
@@ -875,7 +891,7 @@ const OrderFulfillmentChecklistWidget = ({
                 track-and-trace mail (controle elke 30 minuten). Handmatig
                 markeren kan ook:
               </Text>
-              <div>
+              <div className="flex items-center gap-2">
                 <Button
                   variant="primary"
                   size="small"
@@ -884,6 +900,23 @@ const OrderFulfillmentChecklistWidget = ({
                 >
                   Markeer als verzonden &amp; mail klant
                 </Button>
+                {/* Same action, same route, same side effect: only the copy is
+                    the operator's. Gated by the same step state, so editing can
+                    never jump ahead of the checklist. */}
+                <EmailComposer
+                  orderId={orderId}
+                  template="order-shipped"
+                  onSent={() => void loadAll()}
+                  trigger={
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      disabled={steps.ship !== "active" || busyAction}
+                    >
+                      Bewerken en versturen
+                    </Button>
+                  }
+                />
               </div>
               <Text size="xsmall" className="text-ui-fg-muted">
                 De Engelse knoppen elders op deze pagina heb je niet nodig:
