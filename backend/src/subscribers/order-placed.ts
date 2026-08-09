@@ -1,12 +1,9 @@
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { IOrderModuleService, Logger } from '@medusajs/framework/types'
 import { SubscriberArgs, SubscriberConfig } from '@medusajs/medusa'
-import { EmailTemplates } from '../modules/email-notifications/templates'
 import { sendEmailNotification } from '../modules/email-notifications/send-notification'
 import { Sentry } from '../lib/instrument'
-import { buildOrderConfirmationText } from './_helpers/order-confirmation-text'
-import { resolveOrderEmailLocale } from '../lib/email-locale'
-import { ORDER_PLACED_I18N } from '../modules/email-notifications/templates/email-i18n'
+import { composeOrderPlaced } from '../lib/order-email-compose'
 
 export default async function orderPlacedHandler({
   event: { data },
@@ -60,30 +57,26 @@ export default async function orderPlacedHandler({
       return
     }
 
-    const locale = await resolveOrderEmailLocale(container, order.id)
-    const t = ORDER_PLACED_I18N[locale]
-    const replyTo = process.env.SUPPORT_EMAIL || process.env.CONTACT_EMAIL
-    const textBody = buildOrderConfirmationText(order as any, order.shipping_address as any, locale)
+    // The payload lives in the shared composer so the admin "edit before send"
+    // path mails exactly what this subscriber mails. The key policy and the
+    // trigger type stay here.
+    const composed = await composeOrderPlaced(container, order.id)
+    if (!composed.email) {
+      logger.warn(
+        `order.placed: could not compose the confirmation for ${data.id} (${composed.reason}); skipping notification`
+      )
+      return
+    }
 
     await sendEmailNotification(container, {
-      to: order.email,
+      to: composed.email.to,
       channel: 'email',
-      template: EmailTemplates.ORDER_PLACED,
-      idempotency_key: `order-confirmed-${order.id}`,
-      resource_id: order.id,
+      template: composed.email.template,
+      idempotency_key: composed.email.idempotencyKeyBase,
+      resource_id: composed.email.resourceId,
       resource_type: 'order',
       trigger_type: 'order.placed',
-      data: {
-        emailOptions: {
-          ...(replyTo ? { replyTo } : {}),
-          subject: t.subject(order.display_id),
-          text: textBody,
-        },
-        order,
-        shippingAddress: order.shipping_address,
-        locale,
-        preview: t.preview,
-      },
+      data: composed.email.data,
     })
   } catch (error) {
     logger.error(`order.placed: failed to send notification for ${data.id}: ${(error as Error).message}`)
