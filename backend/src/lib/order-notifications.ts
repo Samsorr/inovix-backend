@@ -13,6 +13,28 @@ export type OrderEmail = {
   status: string | null
   created_at: string | Date | null
   idempotency_key: string | null
+  /** True when the operator rewrote copy before this mail went out. */
+  edited: boolean
+}
+
+/**
+ * Was this notification's copy edited before it was sent?
+ *
+ * Two markers, because neither one covers every case on its own:
+ * `data.overrides` holds the rewritten fields, but a subject-only edit moves
+ * its single value into `emailOptions.subject` and leaves `overrides` empty,
+ * so `applyOverrides` also stamps `data.edited`. Older rows predate the flag
+ * and only carry `overrides`, hence both are checked.
+ */
+export function isEditedNotificationData(data: unknown): boolean {
+  if (data == null || typeof data !== "object") return false
+  const record = data as Record<string, unknown>
+  if (record.edited === true) return true
+  const overrides = record.overrides
+  if (overrides == null || typeof overrides !== "object" || Array.isArray(overrides)) {
+    return false
+  }
+  return Object.keys(overrides).length > 0
 }
 
 export async function listOrderEmails(
@@ -43,6 +65,7 @@ export async function listOrderEmails(
       status: n.status ?? null,
       created_at: n.created_at ?? null,
       idempotency_key: n.idempotency_key ?? null,
+      edited: isEditedNotificationData(n.data),
     })),
   }
 }
@@ -61,6 +84,7 @@ export async function getNotification(
     status: n.status ?? null,
     created_at: n.created_at ?? null,
     idempotency_key: n.idempotency_key ?? null,
+    edited: isEditedNotificationData(n.data),
   }
 }
 

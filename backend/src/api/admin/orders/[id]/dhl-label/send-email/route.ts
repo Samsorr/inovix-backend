@@ -3,6 +3,8 @@ import { MedusaError } from "@medusajs/framework/utils"
 import type { Logger } from "@medusajs/framework/types"
 
 import { markDhlOrderShipped } from "../../../../../../lib/mark-dhl-shipped"
+import { validateOverrides } from "../../../../../../lib/order-email-overrides"
+import { EmailTemplates } from "../../../../../../modules/email-notifications/templates"
 
 // POST /admin/orders/:id/dhl-label/send-email
 // Marks the order's DHL fulfillment as shipped and sends the tracking email.
@@ -15,23 +17,46 @@ import { markDhlOrderShipped } from "../../../../../../lib/mark-dhl-shipped"
 // gets a second copy. Without it this route was a silent no-op on an
 // already-mailed order while still answering 200. The response now reports
 // what actually happened so the admin toast cannot lie.
+//
+// Body `{ overrides }` is the composer's edited copy. It arrives HERE and not
+// on the generic email/send route because the shipped mail must keep marking
+// the order shipped: a second send path that skipped markDhlOrderShipped would
+// mail the customer a tracking code for an order the admin still calls unshipped.
 export async function POST(
   req: MedusaRequest,
   res: MedusaResponse
 ): Promise<void> {
   const orderId = req.params.id
   const logger = req.scope.resolve("logger") as Logger
-  const body = (req.body ?? {}) as { resend?: boolean }
+  const body = (req.body ?? {}) as {
+    resend?: boolean
+    overrides?: Record<string, string>
+  }
+
+  const validated = validateOverrides(EmailTemplates.ORDER_SHIPPED, body.overrides)
+  if (!validated.ok) {
+    logger.warn(
+      `admin.dhl-label.send-email: rejected edited copy for order ${orderId}: ${(validated.errors ?? []).join(" ")}`
+    )
+    res.status(400).json({
+      message: "Controleer de ingevulde velden",
+      errors: validated.errors ?? [],
+    })
+    return
+  }
+  const overrides = validated.value ?? {}
+  const edited = Object.keys(overrides).length > 0
 
   try {
     const result = await markDhlOrderShipped(req.scope, orderId, {
       resend: body.resend === true,
+      ...(edited ? { overrides } : {}),
     })
 
     if (result.ok) {
       if (result.email_sent) {
         logger.info(
-          `admin.dhl-label.send-email: shipped email sent for fulfillment ${result.fulfillment_id} on order ${orderId}`
+          `admin.dhl-label.send-email: shipped email sent for fulfillment ${result.fulfillment_id} on order ${orderId}${edited ? " (bewerkt)" : ""}`
         )
       } else {
         logger.warn(
@@ -41,6 +66,7 @@ export async function POST(
       res.status(200).json({
         sent: result.email_sent === true,
         already_shipped: result.already_shipped === true,
+        edited,
         ...(result.email_reason ? { reason: result.email_reason } : {}),
       })
       return

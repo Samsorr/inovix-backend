@@ -385,6 +385,7 @@ describe('applyOverrides', () => {
     expect(next.emailOptions.replyTo).toBe('info@inovix.nl')
     expect(next.overrides).toEqual({ body: 'Eigen tekst' })
     expect(next.overrides.subject).toBeUndefined()
+    expect(next.edited).toBe(true)
   })
 
   it('puts a non-empty remainder on data.overrides', () => {
@@ -392,6 +393,7 @@ describe('applyOverrides', () => {
 
     expect(next.overrides).toEqual({ body: 'Eigen tekst' })
     expect(next.emailOptions.subject).toBe('Standaard onderwerp')
+    expect(next.edited).toBe(true)
   })
 
   it('adds no overrides key when the remainder is empty', () => {
@@ -401,11 +403,28 @@ describe('applyOverrides', () => {
     expect(next.emailOptions.subject).toBe('Alleen het onderwerp')
   })
 
+  // The subject-only hole: `overrides` is empty after the subject moves to
+  // emailOptions, so `data.edited` is the only thing that can keep the
+  // "Bewerkt" badge honest. Stamped inside applyOverrides so the preview and
+  // both send paths cannot disagree about it.
+  it('still marks a subject-only edit as edited', () => {
+    const next = applyOverrides(base, { subject: 'Alleen het onderwerp' })
+
+    expect(next.edited).toBe(true)
+    expect('overrides' in next).toBe(false)
+  })
+
   it('adds no overrides key for an empty override set', () => {
     const next = applyOverrides(base, {})
 
     expect('overrides' in next).toBe(false)
     expect(next.emailOptions.subject).toBe('Standaard onderwerp')
+  })
+
+  it('does not mark an unedited send as edited', () => {
+    const next = applyOverrides(base, {})
+
+    expect('edited' in next).toBe(false)
   })
 
   it('does not mutate the composed payload', () => {

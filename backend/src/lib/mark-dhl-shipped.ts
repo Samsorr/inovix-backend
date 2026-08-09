@@ -65,6 +65,25 @@ export function findShippableDhlFulfillment(order: {
   )
 }
 
+// Resolve the fulfillment the shipped email belongs to, exactly the way
+// markDhlOrderShipped resolves it, so the admin composer offers a draft for the
+// same parcel the send path will mail about. Returns null when the order has no
+// active DHL fulfillment with tracking.
+export async function findDhlFulfillmentId(
+  container: MedusaContainer,
+  orderId: string
+): Promise<string | null> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const { data: orders } = await query.graph({
+    entity: "order",
+    filters: { id: orderId },
+    fields: ORDER_FIELDS,
+  })
+  const order = orders?.[0]
+  if (!order) return null
+  return findShippableDhlFulfillment(order)?.id ?? null
+}
+
 // Idempotent: sets shipped_at + registers the shipment (once) and sends the
 // tracking email (deduped in the helper).
 //
@@ -74,10 +93,15 @@ export function findShippableDhlFulfillment(order: {
 // `{ resend: true }`, which switches the helper to a unique key and produces a
 // real second send. Automatic callers (the auto-mark-shipped cron) must NOT
 // pass it, or every 30-minute tick would mail the customer again.
+//
+// `overrides` carries operator-edited copy (already validated by the route).
+// It rides along this path on purpose: the edited shipped mail must keep the
+// mark-shipped side effect, so the composer posts here rather than to the
+// generic email/send route.
 export async function markDhlOrderShipped(
   container: MedusaContainer,
   orderId: string,
-  opts?: { resend?: boolean }
+  opts?: { resend?: boolean; overrides?: Record<string, string> }
 ): Promise<MarkDhlShippedResult> {
   const logger = container.resolve("logger") as LoggerLike
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
@@ -132,7 +156,11 @@ export async function markDhlOrderShipped(
   const emailResult = await sendOrderShippedNotification(
     container,
     dhlFulfillment.id,
-    { orderId, forceResend: opts?.resend === true }
+    {
+      orderId,
+      forceResend: opts?.resend === true,
+      ...(opts?.overrides ? { overrides: opts.overrides } : {}),
+    }
   )
 
   // Close the order lifecycle once everything is done (captured + shipped);

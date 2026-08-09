@@ -347,6 +347,14 @@ export function applyOverrides(
     emailOptions: { ...(data.emailOptions ?? {}) },
   }
   const rest: Record<string, string> = { ...overrides }
+
+  // Stamp "edited" BEFORE the subject is moved out, and here rather than at
+  // each call site. A subject-only edit empties `rest`, so no `overrides` key
+  // is written and the sent-list badge would call a genuinely edited mail
+  // unedited. One rule in one place: the preview and both send paths inherit
+  // it, and they cannot disagree about what counts as edited.
+  if (Object.keys(rest).length > 0) next.edited = true
+
   if (typeof rest.subject === 'string' && rest.subject.trim().length > 0) {
     next.emailOptions.subject = rest.subject
     delete rest.subject

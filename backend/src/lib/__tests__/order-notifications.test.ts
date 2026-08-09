@@ -4,6 +4,8 @@ jest.mock("@medusajs/framework/utils", () => ({
 }))
 
 import {
+  getNotification,
+  listOrderEmails,
   resendOrderConfirmation,
   resendOrderEmail,
 } from "../order-notifications"
@@ -133,5 +135,85 @@ describe("resendOrderConfirmation", () => {
     const result = await resendOrderConfirmation(container, ORDER_ID)
 
     expect(result).toMatchObject({ ok: false, reason: "error" })
+  })
+})
+
+describe("listOrderEmails edited flag", () => {
+  const BUYER = "buyer@example.com"
+
+  function makeListContainer(rows: any[]) {
+    const listNotifications = jest.fn().mockResolvedValue(rows)
+    const graph = jest.fn().mockResolvedValue({ data: [{ id: ORDER_ID, email: BUYER }] })
+    const container: any = {
+      resolve: (key: string) => {
+        if (key === "notification") return { listNotifications }
+        if (key === "query") return { graph }
+        throw new Error(`unexpected resolve: ${key}`)
+      },
+    }
+    return { container, listNotifications }
+  }
+
+  function row(id: string, data: unknown) {
+    return {
+      id,
+      to: BUYER,
+      channel: "email",
+      template: "order-shipped",
+      status: "success",
+      idempotency_key: `key-${id}`,
+      created_at: "2026-08-01T10:00:00.000Z",
+      data,
+    }
+  }
+
+  it("flags an email as edited when the stored data carries overrides", async () => {
+    const { container } = makeListContainer([
+      row("noti_edited", { emailOptions: {}, overrides: { body: "x" } }),
+      row("noti_empty", { emailOptions: {}, overrides: {} }),
+      row("noti_bare", undefined),
+    ])
+
+    const { notifications } = await listOrderEmails(container, ORDER_ID)
+
+    expect(notifications.map((n) => n.edited)).toEqual([true, false, false])
+  })
+
+  // A subject-only edit leaves `overrides` empty (the subject moves into
+  // emailOptions), so `data.edited` is the only honest marker. applyOverrides
+  // stamps it, and the badge must read it.
+  it("does not read a subject-only edit as unedited", async () => {
+    const { container } = makeListContainer([
+      row("noti_subject_only", {
+        emailOptions: { subject: "Eigen onderwerp" },
+        edited: true,
+      }),
+    ])
+
+    const { notifications } = await listOrderEmails(container, ORDER_ID)
+
+    expect(notifications[0].edited).toBe(true)
+  })
+
+  it("ignores a non-object overrides value instead of counting its characters", async () => {
+    const { container } = makeListContainer([
+      row("noti_string", { overrides: "body" }),
+      row("noti_array", { overrides: ["body"] }),
+      row("noti_null_data", null),
+    ])
+
+    const { notifications } = await listOrderEmails(container, ORDER_ID)
+
+    expect(notifications.map((n) => n.edited)).toEqual([false, false, false])
+  })
+
+  it("returns edited on a single notification too", async () => {
+    const { container } = makeListContainer([
+      row("noti_edited", { overrides: { trackButton: "Volg" } }),
+    ])
+
+    const single = await getNotification(container, "noti_edited")
+
+    expect(single).toMatchObject({ id: "noti_edited", edited: true })
   })
 })
