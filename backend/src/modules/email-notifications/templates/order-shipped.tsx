@@ -76,12 +76,18 @@ export const OrderShippedTemplate: React.FC<OrderShippedTemplateProps> & {
   // number but no URL, so the operator would edit one link and change another.
   // When no label has a URL the operator is supplying the only one, so it goes
   // on the first tracked label.
+  // Must stay identical to `primaryTrackingLabel` in editable-fields.ts, or the
+  // composer offers one parcel's defaults while this rewrites another's.
   const urlIdx = trackedLabels.findIndex((l) => l.tracking_url)
   const overrideIdx = urlIdx === -1 ? 0 : urlIdx
   const trackingUrlFor = (label: ShipmentLabel, idx: number): string =>
     idx === overrideIdx
       ? resolveText(overrides, 'trackingUrl', label.tracking_url ?? '')
       : label.tracking_url ?? ''
+  const trackingCodeFor = (label: ShipmentLabel, idx: number): string =>
+    idx === overrideIdx
+      ? resolveText(overrides, 'trackingCode', label.tracking_number ?? '')
+      : label.tracking_number ?? ''
 
   return (
     <Base preview={preview ?? t.preview} locale={locale}>
@@ -116,13 +122,14 @@ export const OrderShippedTemplate: React.FC<OrderShippedTemplateProps> & {
             </Text>
             {trackedLabels.map((label, idx) => {
               const trackingUrl = trackingUrlFor(label, idx)
+              const trackingCode = trackingCodeFor(label, idx)
               return (
                 <Section key={idx} className="mb-[16px]">
-                  {label.tracking_number ? (
+                  {trackingCode ? (
                     <Text className="text-black text-[13px] leading-[20px] m-0 mb-[12px]">
                       {t.trackingNumber}{' '}
                       <span className="font-semibold">
-                        {label.tracking_number}
+                        {trackingCode}
                       </span>
                     </Text>
                   ) : null}

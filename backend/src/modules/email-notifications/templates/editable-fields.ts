@@ -33,6 +33,8 @@ export type EditableField = {
   label: string
   type: EditableFieldType
   maxLength: number
+  /** Optional Dutch note shown under the input. */
+  hint?: string
   defaultFor: (ctx: EditableFieldContext) => string
 }
 
@@ -40,12 +42,19 @@ function displayId(ctx: EditableFieldContext): string | number {
   return ctx.data?.order?.display_id ?? ''
 }
 
-function firstTrackingUrl(ctx: EditableFieldContext): string {
+/**
+ * The one label the tracking fields edit.
+ *
+ * "First with a URL, else the first tracked one" has to match
+ * `order-shipped.tsx` exactly, otherwise the composer offers one parcel's
+ * defaults while the template rewrites another's.
+ */
+export function primaryTrackingLabel(
+  ctx: EditableFieldContext
+): { tracking_number?: string | null; tracking_url?: string | null } | null {
   const labels = Array.isArray(ctx.data?.labels) ? ctx.data.labels : []
-  for (const label of labels) {
-    if (label?.tracking_url) return String(label.tracking_url)
-  }
-  return ''
+  const tracked = labels.filter((l: any) => l?.tracking_number || l?.tracking_url)
+  return tracked.find((l: any) => l?.tracking_url) ?? tracked[0] ?? null
 }
 
 const shipped = (locale: EmailLocale) => ORDER_SHIPPED_I18N[locale] ?? ORDER_SHIPPED_I18N.nl
@@ -94,6 +103,17 @@ const ORDER_SHIPPED_FIELDS: EditableField[] = [
     maxLength: 60,
     defaultFor: (c) => shipped(c.locale).trackButton,
   },
+  // `trackingCode`, not `trackingNumber`: the i18n key `trackingNumber` is the
+  // label prefix ("Trackingnummer:"), so reusing it would rewrite the caption
+  // instead of the code.
+  {
+    key: 'trackingCode',
+    label: 'Trackingcode',
+    type: 'text',
+    maxLength: 60,
+    hint: 'Past alleen deze e-mail aan. De bestelling en het DHL-label blijven ongewijzigd.',
+    defaultFor: (c) => String(primaryTrackingLabel(c)?.tracking_number ?? ''),
+  },
   // Empty when the order has no tracked label. That is fine: this template is
   // only offered for orders that have one, and the route refuses to compose
   // otherwise.
@@ -102,7 +122,8 @@ const ORDER_SHIPPED_FIELDS: EditableField[] = [
     label: 'Tracking-link',
     type: 'url',
     maxLength: 500,
-    defaultFor: (c) => firstTrackingUrl(c),
+    hint: 'Past alleen deze e-mail aan. Pas de link mee aan als je de trackingcode wijzigt.',
+    defaultFor: (c) => String(primaryTrackingLabel(c)?.tracking_url ?? ''),
   },
 ]
 

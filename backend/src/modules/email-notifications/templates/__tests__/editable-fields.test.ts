@@ -47,6 +47,7 @@ describe("editable-fields registry", () => {
       "trackingHeading",
       "trackingBody",
       "trackButton",
+      "trackingCode",
       "trackingUrl",
     ])
   })
@@ -92,6 +93,49 @@ describe("editable-fields registry", () => {
         expect(f.label.length).toBeGreaterThan(0)
         expect(f.maxLength).toBeGreaterThan(0)
       }
+    }
+  })
+})
+
+describe("tracking fields target one label, consistently", () => {
+  // The i18n key `trackingNumber` is the caption "Trackingnummer:", so the
+  // editable code deliberately uses its own key.
+  it("does not reuse the trackingNumber i18n key for the code", () => {
+    const keys = editableFieldsFor("order-shipped").map((f) => f.key)
+    expect(keys).toContain("trackingCode")
+    expect(keys).not.toContain("trackingNumber")
+  })
+
+  it("defaults the code and the link from the SAME label", () => {
+    const data = {
+      order: { display_id: 28416 },
+      labels: [
+        { tracking_number: "GEEN-URL", tracking_url: null },
+        { tracking_number: "JVGL2", tracking_url: "https://my.dhlecommerce.nl/tweede" },
+      ],
+    }
+    const fields = editableFieldsFor("order-shipped")
+    const code = fields.find((f) => f.key === "trackingCode")!
+    const url = fields.find((f) => f.key === "trackingUrl")!
+
+    expect(code.defaultFor({ locale: "nl", data })).toBe("JVGL2")
+    expect(url.defaultFor({ locale: "nl", data })).toBe("https://my.dhlecommerce.nl/tweede")
+  })
+
+  it("falls back to the first tracked label when none carries a link", () => {
+    const data = {
+      order: { display_id: 28416 },
+      labels: [{ tracking_number: "ALLEEN-CODE", tracking_url: null }],
+    }
+    const fields = editableFieldsFor("order-shipped")
+    expect(fields.find((f) => f.key === "trackingCode")!.defaultFor({ locale: "nl", data })).toBe("ALLEEN-CODE")
+    expect(fields.find((f) => f.key === "trackingUrl")!.defaultFor({ locale: "nl", data })).toBe("")
+  })
+
+  it("warns in the hint that this changes the email only", () => {
+    for (const key of ["trackingCode", "trackingUrl"]) {
+      const field = editableFieldsFor("order-shipped").find((f) => f.key === key)!
+      expect(field.hint).toContain("alleen deze e-mail")
     }
   })
 })

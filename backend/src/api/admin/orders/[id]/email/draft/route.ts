@@ -49,6 +49,7 @@ export async function GET(
       label: field.label,
       type: field.type,
       maxLength: field.maxLength,
+      ...(field.hint ? { hint: field.hint } : {}),
       value: field.defaultFor({ locale: composed.locale, data: composed.data }),
     }))
 

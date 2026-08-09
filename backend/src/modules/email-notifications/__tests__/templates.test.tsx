@@ -491,3 +491,52 @@ describe('order-shipped tracking url override targets the label the composer sho
     expect(html).not.toContain('https://my.dhlecommerce.nl/tweede')
   })
 })
+
+describe('order-shipped tracking code override', () => {
+  const base = {
+    order: { id: 'order_1', display_id: '28416', email: 'k@example.com', currency_code: 'eur' },
+    shippingAddress: { first_name: 'Sarah', last_name: 'Lenze', address_1: 'Schmerwitz 45C', city: 'Wiesenburg', postal_code: '14827', country_code: 'de' },
+    items: [{ id: 'i1', title: 'GHK-Cu', quantity: 1 }],
+    locale: 'nl',
+  }
+
+  it('replaces the printed tracking code and leaves the rest alone', () => {
+    const html = ReactDOMServer.renderToStaticMarkup(
+      generateEmailTemplate('order-shipped', {
+        ...base,
+        labels: [{ tracking_number: 'JVGL-ECHT', tracking_url: 'https://my.dhlecommerce.nl/x', label_url: null }],
+        overrides: { trackingCode: 'JVGL-HANDMATIG' },
+      }) as React.ReactElement
+    )
+    expect(html).toContain('JVGL-HANDMATIG')
+    expect(html).not.toContain('JVGL-ECHT')
+    expect(html).toContain('Trackingnummer:')
+    expect(html).toContain('https://my.dhlecommerce.nl/x')
+  })
+
+  it('keeps the real code when the field is untouched', () => {
+    const html = ReactDOMServer.renderToStaticMarkup(
+      generateEmailTemplate('order-shipped', {
+        ...base,
+        labels: [{ tracking_number: 'JVGL-ECHT', tracking_url: 'https://my.dhlecommerce.nl/x', label_url: null }],
+      }) as React.ReactElement
+    )
+    expect(html).toContain('JVGL-ECHT')
+  })
+
+  it('edits the same label the composer offered as the default', () => {
+    const html = ReactDOMServer.renderToStaticMarkup(
+      generateEmailTemplate('order-shipped', {
+        ...base,
+        labels: [
+          { tracking_number: 'GEEN-URL', tracking_url: null, label_url: null },
+          { tracking_number: 'JVGL2', tracking_url: 'https://my.dhlecommerce.nl/tweede', label_url: null },
+        ],
+        overrides: { trackingCode: 'JVGL-HANDMATIG' },
+      }) as React.ReactElement
+    )
+    expect(html).toContain('JVGL-HANDMATIG')
+    expect(html).not.toContain('JVGL2')
+    expect(html).toContain('GEEN-URL')
+  })
+})

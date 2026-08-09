@@ -339,6 +339,11 @@ export function EmailComposer({
                               onChange={(e) => setFieldValue(field.key, e.target.value)}
                             />
                           )}
+                          {field.hint ? (
+                            <Text size="xsmall" className="text-ui-fg-subtle">
+                              {field.hint}
+                            </Text>
+                          ) : null}
                           <Text size="xsmall" className="text-ui-fg-muted">
                             {value.length} / {field.maxLength} tekens
                             {isChanged ? " | aangepast" : ""}

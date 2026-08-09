@@ -238,6 +238,7 @@ describe("GET /admin/orders/:id/email/draft", () => {
       "trackingHeading",
       "trackingBody",
       "trackButton",
+      "trackingCode",
       "trackingUrl",
     ])
 

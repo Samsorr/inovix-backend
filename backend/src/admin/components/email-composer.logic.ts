@@ -10,6 +10,8 @@ export type ComposerField = {
   label: string
   type: ComposerFieldType
   maxLength: number
+  /** Optional Dutch note under the input. */
+  hint?: string
   value: string
 }
 
