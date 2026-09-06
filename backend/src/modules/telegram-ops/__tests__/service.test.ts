@@ -1,9 +1,13 @@
 jest.mock('../telegram-client', () => ({
   sendTelegramRequest: jest.fn().mockResolvedValue({ ok: true }),
 }))
+jest.mock('../../../lib/instrument', () => ({
+  Sentry: { captureMessage: jest.fn() },
+}))
 
 import TelegramOpsService from '../service'
 import { sendTelegramRequest } from '../telegram-client'
+import { Sentry } from '../../../lib/instrument'
 
 const OPTS = {
   botToken: 'TOKEN',
@@ -111,6 +115,31 @@ describe('phase 2 service additions', () => {
     expect(sendTelegramRequest).toHaveBeenCalledWith('TOKEN', 'editMessageText',
       expect.objectContaining({ chat_id: '111', message_id: 42, text: 'new text', parse_mode: 'HTML' }))
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('message not found'))
+  })
+
+  it('editMessage reports a failed edit to Sentry as a warning', async () => {
+    ;(sendTelegramRequest as jest.Mock).mockResolvedValue({ ok: false, description: 'message not found' })
+    const svc = new (TelegramOpsService as any)({ logger: { error: jest.fn() } }, OPTS) as TelegramOpsService
+    await svc.editMessage('111', 42, 'new text')
+    expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect.stringContaining('message not found'),
+      expect.objectContaining({ level: 'warning' })
+    )
+  })
+
+  it("editMessage treats Telegram's 'message is not modified' as success (INOVIX-BACKEND-E)", async () => {
+    // Telegram answers 400 when the edit would leave text and keyboard
+    // identical, e.g. a double tap that re-renders the same checklist. The
+    // message on screen is already what we wanted: not an error.
+    ;(sendTelegramRequest as jest.Mock).mockResolvedValue({
+      ok: false,
+      description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message',
+    })
+    const logger = { error: jest.fn() }
+    const svc = new (TelegramOpsService as any)({ logger }, OPTS) as TelegramOpsService
+    await expect(svc.editMessage('111', 42, 'same text')).resolves.toBeUndefined()
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(Sentry.captureMessage).not.toHaveBeenCalled()
   })
 
   it('editMessage removes the keyboard unless extra provides one', async () => {

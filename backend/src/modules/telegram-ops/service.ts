@@ -115,6 +115,11 @@ class TelegramOpsService extends MedusaService({ TelegramOpsEvent }) {
       ...extra,
     })
     if (!res.ok) {
+      // Telegram answers 400 "message is not modified" when text and keyboard
+      // are already identical (a second tap that re-renders the same view).
+      // The message on screen is exactly what was asked for: not a failure,
+      // so no log line and no Sentry warning (INOVIX-BACKEND-E).
+      if (/message is not modified/i.test(res.description ?? '')) return
       try {
         const message = `telegram-ops: editMessageText in chat ${chatId} failed: ${res.description ?? 'unknown error'}`
         this.logger_?.error?.(message)
